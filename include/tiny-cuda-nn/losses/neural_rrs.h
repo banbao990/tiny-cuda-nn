@@ -73,10 +73,11 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 					const float loss_scale, const uint32_t step, const float *__restrict__ thp,
 					const float *__restrict__ pdf, const float *__restrict__ error,
 					const float *__restrict__ ref_mean, const float *__restrict__ error_sum,
-					const uint32_t pixels_num, const T *__restrict__ predictions,
-					const float *__restrict__ targets, float *__restrict__ values,
-					T *__restrict__ gradients, const float *__restrict__ data_pdf = nullptr,
-					const bool clampOn = false, const float clampMax = 10.0f
+					const float *__restrict__ sample_weight, const uint32_t pixels_num,
+					const T *__restrict__ predictions, const float *__restrict__ targets,
+					float *__restrict__ values, T *__restrict__ gradients,
+					const float *__restrict__ data_pdf = nullptr, const bool clampOn = false,
+					const float clampMax = 10.0f
 #ifdef BB_TCNN_DEBUG_MODE
 					,
 					const uint32_t showLossIndex = 0
@@ -89,34 +90,46 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 	const uint32_t prediction_idx = thread_idx * stride;
 
 	if (step == 3) {
+#define BB_GAMMA1 1.0f
 #define BB_GAMMA2 1.0f
+#define BB_GAMMA3 0 // 1e-4f
 		// now the output is rrs
 
 		const float var_sum		   = *error_sum;
 		const float rrs_loss_scale = 1e-3f;
 
-		float rrs	   = (float) predictions[prediction_idx + 6];
-		float var	   = error[thread_idx];
-		float path_pdf = pdf[thread_idx];
+		float rrs					 = (float) predictions[prediction_idx + 6];
+		float var					 = error[thread_idx];
+		float path_pdf				 = pdf[thread_idx];
+		const float pixel_err_weight = sample_weight[thread_idx];
 
+		// const float sigmoid_scale = 20.0f;
 		// sigmoid, s(x) = 1 / (1 + exp(-x))
 		// rrs = 1.0f / (1.0f + expf(-rrs));
-		// rrs = rrs * (5.0 - 0.5) + 0.5;
 
+		float dactivate_drrs = 1.0f;
 		// s'(x) = s(x) * (1 - s(x))
-		// float dactivate_drrs = rrs * (1.0f - rrs) * (5.0f - 0.5f);
+		// dactivate_drrs = rrs * (1.0f - rrs) * sigmoid_scale;
+		// rrs *= sigmoid_scale;
 
 		{ // k = 1
 			// loss
 			const uint32_t prediction_rrs_idx = prediction_idx + 6;
 			float e1						  = var - var_sum / pixels_num;
-			values[prediction_rrs_idx]		  = rrs_loss_scale * (abs(e1) + BB_GAMMA2 * var);
+			values[prediction_rrs_idx] =
+				rrs_loss_scale *
+				(pixel_err_weight * (BB_GAMMA1 * abs(e1) + BB_GAMMA2 * var) + BB_GAMMA3 * rrs);
 
 			// gradient
 			float dE_dvar =
-				(e1 > 0 ? 1 : -1) * (float(pixels_num - 1) / float(pixels_num)) + BB_GAMMA2;
+				BB_GAMMA1 * ((e1 > 0 ? 1 : -1) * (float(pixels_num - 1) / float(pixels_num))) +
+				BB_GAMMA2;
+
+			// dE_dvar *= expf(var) - 1.0f; // log scale
+
 			// rel var
-			// float rel_inv = max(ref_mean[thread_idx], 1e-4f);
+			// float rel_inv = ref_mean[thread_idx];
+			// rel_inv		  = max(rel_inv * rel_inv, 1e-4f);
 			// rel_inv		  = rel_inv > 0 ? 1.0f / rel_inv : 0;
 			// TODO: this may not needed as we divided by it when use it
 			constexpr float rel_inv = 1.0f;
@@ -135,11 +148,16 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 			}
 			float dvar_drrs = -path_pdf * path_var / max(rrs * rrs, 1e-4f);
 
-			gradients[prediction_rrs_idx] = (T) (loss_scale * rrs_loss_scale * dE_dvar * rel_inv *
-												 dvar_drrs * 100.0f /** dactivate_drrs*/);
+			gradients[prediction_rrs_idx] =
+				(T) (loss_scale * rrs_loss_scale *
+					 (pixel_err_weight * (dE_dvar * rel_inv * dvar_drrs * 100.0f) + BB_GAMMA3) *
+					 dactivate_drrs);
 		}
 
+#undef BB_GAMMA1
 #undef BB_GAMMA2
+#undef BB_GAMMA3
+
 	} else {
 		const uint32_t target_idx = thread_idx * 3; // thp: dim = 3
 
@@ -171,8 +189,15 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 		// activation: softplus
 		// const float prediction_ori_exp = expf(prediction_ori);
 		// const float prediction = log1pf(prediction_ori_exp);
-		const float prediction = prediction_ori;
-		const float difference = rrs_loss_scale * (prediction - rrs_gt);
+		float prediction	 = prediction_ori;
+		float dactivate_drrs = 1.0f;
+
+		// const float sigmoid_scale = 20.f;
+		// prediction				  = 1.0f / (1.0f + expf(-prediction_ori));
+		// dactivate_drrs			  = prediction * (1.0f - prediction) * sigmoid_scale;
+		// prediction *= sigmoid_scale;
+
+		const float difference = rrs_loss_scale * dactivate_drrs * (prediction - rrs_gt);
 		const uint32_t n_total = n_elements;
 		const float pdf		   = data_pdf ? data_pdf[target_idx] : 1;
 
@@ -265,8 +290,9 @@ public:
 
 		linear_kernel(neural_rrs_loss_rrs<T>, 0, stream, prediction.n_elements() / stride, stride,
 					  dims, loss_scale, mStep, thpPtr, pdfPtr, errorPtr, refPtr,
-					  mLossSumErrorGPUPtr, mPixels, prediction.data(), target.data(), values.data(),
-					  gradients.data(), data_pdf ? data_pdf->data() : nullptr, mClampOn, mClampMax
+					  mLossSumErrorGPUPtr, mSampleWeight, mPixels, prediction.data(), target.data(),
+					  values.data(), gradients.data(), data_pdf ? data_pdf->data() : nullptr,
+					  mClampOn, mClampMax
 #ifdef BB_TCNN_DEBUG_MODE
 					  ,
 					  mShowLossIndex
@@ -282,10 +308,11 @@ public:
 		mShowLossIndex = params.value("show_loss_index", mShowLossIndex);
 		mPixels		   = params.value("pixels", mPixels);
 
-		mThp	 = (float *) params.value("thp", (uint64_t) mThp);
-		mPdf	 = (float *) params.value("pdf", (uint64_t) mPdf);
-		mError	 = (float *) params.value("error", (uint64_t) mError);
-		mRefMean = (float *) params.value("ref_mean", (uint64_t) mRefMean);
+		mThp		  = (float *) params.value("thp", (uint64_t) mThp);
+		mPdf		  = (float *) params.value("pdf", (uint64_t) mPdf);
+		mError		  = (float *) params.value("error", (uint64_t) mError);
+		mRefMean	  = (float *) params.value("ref_mean", (uint64_t) mRefMean);
+		mSampleWeight = (float *) params.value("sample_weight", (uint64_t) mSampleWeight);
 		mLossSumErrorGPUPtr =
 			(float *) params.value("error_sum_ptr", (uint64_t) mLossSumErrorGPUPtr);
 
@@ -312,6 +339,7 @@ public:
 	float *mThp;
 	float *mPdf;
 	float *mError;
+	float *mSampleWeight;
 	float *mRefMean; // this is 1 floats for each element
 
 	float *mLossSumErrorGPUPtr; // the GPU address of the sum of error
