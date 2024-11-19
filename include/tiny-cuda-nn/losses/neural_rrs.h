@@ -79,12 +79,18 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 
 	const uint32_t prediction_idx = thread_idx * stride;
 
-	if (step == 3) {
-#define BB_GAMMA1 1.0f
-#define BB_GAMMA2 1.0f
-#define BB_GAMMA3 0.0f // 1e-4f
-		// now the output is rrs
+#define BB_GAMMA1 1e-1f
+#define BB_GAMMA2 1e-1f
+#define BB_GAMMA3 0e-2f // 1e-4f
 
+#ifdef BB_TCNN_DEBUG_MODE
+	float grad_avg = 0.0f;
+	float grad_min = 0.0f;
+	float grad_rrs = 0.0f;
+#endif
+
+	if (step == 3) {
+		// now the output is rrs
 		const float var_sum		   = *error_sum;
 		const float rrs_loss_scale = 1e-3f;
 
@@ -101,12 +107,16 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 		// rrs *= BB_SIGMOID_SCALE;
 
 		{ // k = 1
+			const float net_data_pdf = data_pdf ? data_pdf[thread_idx] : 1.0f;
+
 			// loss
 			const uint32_t prediction_rrs_idx = prediction_idx + 6;
 			float e1						  = var - var_sum / pixels_num;
 			values[prediction_rrs_idx] =
 				rrs_loss_scale *
-				(pixel_err_weight * (BB_GAMMA1 * abs(e1) + BB_GAMMA2 * var) + BB_GAMMA3 * rrs);
+				(pixel_err_weight * (BB_GAMMA1 * abs(e1) + BB_GAMMA2 * var) +
+				 (BB_GAMMA3 * (rrs - 1) * (rrs - 1))) /
+				net_data_pdf;
 
 			// gradient
 			float dE_dvar =
@@ -137,14 +147,32 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 			path_var		= max(ex2 - ex * ex, 0.0f);
 			// }
 			const float dvar_drrs = -path_pdf * path_var / max(rrs * rrs, NRRS_EPSILON);
-			const float grad	  = loss_scale * rrs_loss_scale *
-							   (pixel_err_weight * (dE_dvar * rel_inv * dvar_drrs) + BB_GAMMA3) *
-							   dactivate_drrs;
-			gradients[prediction_rrs_idx] = (T) (grad);
+			float grad =
+				loss_scale * rrs_loss_scale *
+				(pixel_err_weight * (dE_dvar * rel_inv * dvar_drrs) + BB_GAMMA3 * 2 * (rrs - 1)) *
+				dactivate_drrs;
+
+			grad = fmaxf(-1e1f, fminf(1e1f, grad));
+
+			gradients[prediction_rrs_idx] = (T) (grad / net_data_pdf);
+
+#ifdef BB_TCNN_DEBUG_MODE
+			grad_avg =
+				loss_scale * rrs_loss_scale *
+				(pixel_err_weight *
+				 ((BB_GAMMA1 * ((e1 > 0 ? 1 : -1) * (float(pixels_num - 1) / float(pixels_num)))) *
+				  rel_inv * dvar_drrs)) *
+				dactivate_drrs / net_data_pdf;
+			grad_min = loss_scale * rrs_loss_scale *
+					   (pixel_err_weight * (BB_GAMMA2 * rel_inv * dvar_drrs)) * dactivate_drrs /
+					   net_data_pdf;
+			grad_rrs = loss_scale * rrs_loss_scale * (BB_GAMMA3 * 2 * (rrs - 1)) * dactivate_drrs /
+					   net_data_pdf;
+#endif
 
 #ifdef BB_TCNN_DEBUG_MODE
 			// check nan
-			if (isnan(grad) || isinf(grad) || isnan(rrs) || abs(grad) >= 1e3) {
+			if (isnan(grad) || isinf(grad) || isnan(rrs) || abs(grad) >= 1e2) {
 				// check loss
 				float o_l1 = rrs_loss_scale * (pixel_err_weight * (1.0f * abs(e1)));
 				float o_l2 = rrs_loss_scale * (pixel_err_weight * (1.0f * var));
@@ -209,10 +237,6 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 			}
 #endif
 		}
-
-#undef BB_GAMMA1
-#undef BB_GAMMA2
-#undef BB_GAMMA3
 
 	} else {
 		const uint32_t target_idx = thread_idx * 3; // thp: dim = 3
@@ -294,7 +318,7 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 	// 		values[IDX(i)] = sum;
 	// 	}
 	// }
-	if (showLossIndex != 0 && showLossIndex <= 4) {
+	if (showLossIndex != 0 && showLossIndex <= 8) {
 		float sum = 0;
 		if (showLossIndex == 1) {
 			for (int i = 0; i < 3; ++i) {
@@ -310,6 +334,16 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 			for (int i = 0; i < 7; ++i) {
 				sum += (float) gradients[IDX(i)];
 			}
+		} else if (showLossIndex == 5) {
+			for (int i = 0; i < 6; ++i) {
+				sum += (float) gradients[IDX(i)];
+			}
+		} else if (showLossIndex == 6) {
+			sum = grad_avg;
+		} else if (showLossIndex == 7) {
+			sum = grad_min;
+		} else if (showLossIndex == 8) {
+			sum = grad_rrs;
 		}
 		sum /= 7;
 		for (int i = 0; i < 7; ++i) {
@@ -318,6 +352,10 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 #undef IDX
 	}
 #endif
+
+#undef BB_GAMMA1
+#undef BB_GAMMA2
+#undef BB_GAMMA3
 }
 
 template <typename T> class NeuralRRSLoss : public Loss<T> {
@@ -423,15 +461,6 @@ __global__ void neural_rrs_loss_L_L2(const uint32_t n_elements, const uint32_t s
 
 	const uint32_t j = threadIdx.x + blockIdx.x * blockDim.x;
 	if (j >= n_elements) return;
-
-	// why slower? you idiot! DIVERGENCE !!!
-	// const uint32_t warp	 = 32;
-	// const uint32_t warp2 = warp * warp;
-	// const uint32_t j1 = j / warp2;
-	// const uint32_t j2 = j % warp2;
-	// const uint32_t j3 = j2 / warp;
-	// const uint32_t j4 = j2 % warp;
-	// const uint32_t i = j1 * warp2 + j4 * warp + j3;
 
 	const uint32_t i = j;
 
