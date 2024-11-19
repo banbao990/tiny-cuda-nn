@@ -136,15 +136,16 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 
 			float path_var = 0.0f;
 			// {
-			const float r	= (float) predictions[prediction_idx + 0];
-			const float g	= (float) predictions[prediction_idx + 1];
-			const float b	= (float) predictions[prediction_idx + 2];
-			const float r2	= (float) predictions[prediction_idx + 3];
-			const float g2	= (float) predictions[prediction_idx + 4];
-			const float b2	= (float) predictions[prediction_idx + 5];
-			const float ex	= (r + g + b) / 3.0f;
-			const float ex2 = (rrs >= 1.0f) ? ((r2 + g2 + b2) / 3.0f) : 0.0f; // RR & S
-			path_var		= max(ex2 - ex * ex, 0.0f);
+			const float r  = (float) predictions[prediction_idx + 0];
+			const float g  = (float) predictions[prediction_idx + 1];
+			const float b  = (float) predictions[prediction_idx + 2];
+			const float r2 = (float) predictions[prediction_idx + 3];
+			const float g2 = (float) predictions[prediction_idx + 4];
+			const float b2 = (float) predictions[prediction_idx + 5];
+			const float ex = (r + g + b) / 3.0f;
+			float ex2	   = (rrs >= 1.0f) ? ((r2 + g2 + b2) / 3.0f) : 0.0f; // RR & S
+			ex2			   = min(ex2, 1e4f); // ex2 maybe inf, clamp it < 1e4
+			path_var	   = max(ex2 - ex * ex, 0.0f);
 			// }
 			const float dvar_drrs = -path_pdf * path_var / max(rrs * rrs, NRRS_EPSILON);
 			float grad =
@@ -518,9 +519,12 @@ __global__ void neural_rrs_loss_L_L2(const uint32_t n_elements, const uint32_t s
 			scale *= scale1;
 		}
 
-		values[i + 3]	 = v;
+		// if nan, set to 0
+		bool v_is_nan	 = isnan(v);
+		values[i + 3]	 = v_is_nan ? 0 : v;
 		float gradient	 = 2 * difference / prediction_sq_plus_epsilon / pdf;
-		gradients[i + 3] = (T) (scale * loss_scale * gradient / n_total);
+		gradient		 = scale * loss_scale * gradient / n_total;
+		gradients[i + 3] = (T) (v_is_nan ? 0 : gradient);
 	}
 }
 } // namespace tcnn
