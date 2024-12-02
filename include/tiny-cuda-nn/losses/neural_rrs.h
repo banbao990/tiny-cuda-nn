@@ -35,6 +35,8 @@
 #include <tiny-cuda-nn/loss.h>
 #include <tiny-cuda-nn/reduce_sum.h>
 
+// #define BB_NLL
+
 #define BB_TCNN_DEBUG_MODE
 // #undef BB_TCNN_DEBUG_MODE
 
@@ -79,9 +81,12 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 
 	const uint32_t prediction_idx = thread_idx * stride;
 
+// #define BB_GAMMA1 8e-2f
+// #define BB_GAMMA2 1e-1f
+// #define BB_GAMMA3 1e-2f // 1e-4f
 #define BB_GAMMA1 1e-1f
 #define BB_GAMMA2 1e-1f
-#define BB_GAMMA3 0e-2f // 1e-4f
+#define BB_GAMMA3 0e-2f
 
 #ifdef BB_TCNN_DEBUG_MODE
 	float grad_avg = 0.0f;
@@ -91,8 +96,13 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 
 	if (step == 3) {
 		// now the output is rrs
-		const float var_sum		   = *error_sum;
-		const float rrs_loss_scale = 1e-3f;
+		const float var_sum = *error_sum;
+
+		const float rrs_loss_scale = 1e0;
+		const uint32_t n_total	   = n_elements;
+
+		// const float rrs_loss_scale = 1e-3;
+		// const uint32_t n_total	   = 1;
 
 		float rrs					 = (float) predictions[prediction_idx + 6];
 		float var					 = error[thread_idx];
@@ -112,11 +122,13 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 			// loss
 			const uint32_t prediction_rrs_idx = prediction_idx + 6;
 			float e1						  = var - var_sum / pixels_num;
-			values[prediction_rrs_idx] =
-				rrs_loss_scale *
-				(pixel_err_weight * (BB_GAMMA1 * abs(e1) + BB_GAMMA2 * var) +
-				 (BB_GAMMA3 * (rrs - 1) * (rrs - 1))) /
-				net_data_pdf;
+
+			float loss_value =
+				rrs_loss_scale * (pixel_err_weight * (BB_GAMMA1 * abs(e1) + BB_GAMMA2 * var) +
+								  (BB_GAMMA3 * (rrs - 1) * (rrs - 1)));
+			loss_value /= net_data_pdf * n_total;
+
+			values[prediction_rrs_idx] = loss_value;
 
 			// gradient
 			float dE_dvar =
@@ -154,8 +166,9 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 				dactivate_drrs;
 
 			grad = fmaxf(-1e1f, fminf(1e1f, grad));
+			grad /= net_data_pdf * n_total;
 
-			gradients[prediction_rrs_idx] = (T) (grad / net_data_pdf);
+			gradients[prediction_rrs_idx] = (T) (grad);
 
 #ifdef BB_TCNN_DEBUG_MODE
 			grad_avg =
@@ -163,12 +176,12 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 				(pixel_err_weight *
 				 ((BB_GAMMA1 * ((e1 > 0 ? 1 : -1) * (float(pixels_num - 1) / float(pixels_num)))) *
 				  rel_inv * dvar_drrs)) *
-				dactivate_drrs / net_data_pdf;
+				dactivate_drrs / (net_data_pdf * n_total);
 			grad_min = loss_scale * rrs_loss_scale *
 					   (pixel_err_weight * (BB_GAMMA2 * rel_inv * dvar_drrs)) * dactivate_drrs /
-					   net_data_pdf;
+					   (net_data_pdf * n_total);
 			grad_rrs = loss_scale * rrs_loss_scale * (BB_GAMMA3 * 2 * (rrs - 1)) * dactivate_drrs /
-					   net_data_pdf;
+					   (net_data_pdf * n_total);
 #endif
 
 #ifdef BB_TCNN_DEBUG_MODE
@@ -278,7 +291,7 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 		// prediction *= BB_SIGMOID_SCALE;
 
 		const float difference = rrs_loss_scale * dactivate_drrs * (prediction - rrs_gt);
-		const uint32_t n_total = n_elements;
+		const uint32_t n_total = n_elements; // /stride; // why error?
 		const float pdf		   = data_pdf ? data_pdf[target_idx] : 1;
 
 		// const float prediction_sq_plus_epsilon = luminance * luminance + NRRS_EPSILON;
@@ -381,10 +394,6 @@ public:
 #endif
 		);
 
-		if (mStep == 3) {
-			printf("[offset] %d\n", mOffset);
-		}
-
 		const float *thpPtr	  = mThp + mOffset * 3;		// sizeof(mThp)/sizeof(float) = 3
 		const float *pdfPtr	  = mPdf + mOffset * 3;		// sizeof(mPdf)/sizeof(float) = 3
 		const float *errorPtr = mError + mOffset * 1;	// sizeof(mError)/sizeof(float) = 1
@@ -482,6 +491,10 @@ __global__ void neural_rrs_loss_L_L2(const uint32_t n_elements, const uint32_t s
 	const uint32_t n_total = n_elements / stride * calc_dims;
 	const float pdf		   = data_pdf ? data_pdf[target_idx] : 1;
 
+	// max negative log likelihood
+
+#ifdef BB_NLL
+#else
 	{ // L
 		const float prediction = (float) predictions[i];
 
@@ -526,5 +539,9 @@ __global__ void neural_rrs_loss_L_L2(const uint32_t n_elements, const uint32_t s
 		gradient		 = scale * loss_scale * gradient / n_total;
 		gradients[i + 3] = (T) (v_is_nan ? 0 : gradient);
 	}
+#endif
 }
 } // namespace tcnn
+
+#undef BB_NLL
+#undef BB_TCNN_DEBUG_MODE
