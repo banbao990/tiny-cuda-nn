@@ -72,7 +72,8 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 					const float clampMax = 10.0f
 #ifdef BB_TCNN_DEBUG_MODE
 					,
-					const uint32_t showLossIndex = 0
+					const uint32_t showLossIndex = 0, const uint32_t *pixelID = nullptr,
+					const int32_t debugPixel = -1
 #endif
 ) {
 
@@ -155,9 +156,11 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 			const float g2 = (float) predictions[prediction_idx + 4];
 			const float b2 = (float) predictions[prediction_idx + 5];
 			const float ex = (r + g + b) / 3.0f;
-			float ex2	   = (rrs >= 1.0f) ? ((r2 + g2 + b2) / 3.0f) : 0.0f; // RR & S
+			float ex2	   = (r2 + g2 + b2) / 3.0f;
 			ex2			   = min(ex2, 1e4f); // ex2 maybe inf, clamp it < 1e4
-			path_var	   = max(ex2 - ex * ex, 0.0f);
+
+			float ex_ex = (rrs >= 1.0f) ? (ex * ex) : 0.0f; // RR & S
+			path_var	= max(ex2 - ex_ex, 0.0f);
 			// }
 			const float dvar_drrs = -path_pdf * path_var / max(rrs * rrs, NRRS_EPSILON);
 			float grad =
@@ -185,8 +188,10 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 #endif
 
 #ifdef BB_TCNN_DEBUG_MODE
+			const bool should_debug =
+				(debugPixel != -1) && (pixelID != nullptr) && (pixelID[thread_idx] == debugPixel);
 			// check nan
-			if (isnan(grad) || isinf(grad) || isnan(rrs) || abs(grad) >= 1e2) {
+			if (should_debug || isnan(grad) || isinf(grad) || isnan(rrs) || abs(grad) >= 1e2) {
 				// check loss
 				float o_l1 = rrs_loss_scale * (pixel_err_weight * (1.0f * abs(e1)));
 				float o_l2 = rrs_loss_scale * (pixel_err_weight * (1.0f * var));
@@ -394,24 +399,27 @@ public:
 #endif
 		);
 
-		const float *thpPtr	  = mThp + mOffset * 3;		// sizeof(mThp)/sizeof(float) = 3
-		const float *pdfPtr	  = mPdf + mOffset * 3;		// sizeof(mPdf)/sizeof(float) = 3
-		const float *errorPtr = mError + mOffset * 1;	// sizeof(mError)/sizeof(float) = 1
-		const float *refPtr	  = mRefMean + mOffset * 1; // sizeof(mRefMean)/sizeof(float) = 1
+		const float *thpPtr			 = mThp + mOffset * 3;			// 3 float
+		const float *pdfPtr			 = mPdf + mOffset * 3;			// 3 float
+		const float *errorPtr		 = mError + mOffset * 1;		// 1 float
+		const float *sampleWeightPtr = mSampleWeight + mOffset * 1; // 1 float
+		const float *refPtr			 = mRefMean + mOffset * 1;		// 1 float
+		const uint32_t *pixelIDPtr	 = mPixelID + mOffset * 1;		// 1 uint32_t
 
 		linear_kernel(neural_rrs_loss_rrs<T>, 0, stream, prediction.n_elements() / stride, stride,
 					  dims, loss_scale, mStep, thpPtr, pdfPtr, errorPtr, refPtr,
-					  mLossSumErrorGPUPtr, mSampleWeight, mPixels, prediction.data(), target.data(),
-					  values.data(), gradients.data(), data_pdf ? data_pdf->data() : nullptr,
-					  mClampOn, mClampMax
+					  mLossSumErrorGPUPtr, sampleWeightPtr, mPixels, prediction.data(),
+					  target.data(), values.data(), gradients.data(),
+					  data_pdf ? data_pdf->data() : nullptr, mClampOn, mClampMax
 #ifdef BB_TCNN_DEBUG_MODE
 					  ,
-					  mShowLossIndex
+					  mShowLossIndex, pixelIDPtr, mDebugPixel
 #endif
 		);
 	}
 
 	void update_hyperparams(const json &params) override {
+		mDebugPixel	   = params.value("debug_pixel_id", mDebugPixel);
 		mOffset		   = params.value("offset", mOffset);
 		mClampMax	   = params.value("clamp_max", mClampMax);
 		mClampOn	   = params.value("clamp_on", mClampOn);
@@ -426,6 +434,7 @@ public:
 		mSampleWeight = (float *) params.value("sample_weight", (uint64_t) mSampleWeight);
 		mLossSumErrorGPUPtr =
 			(float *) params.value("error_sum_ptr", (uint64_t) mLossSumErrorGPUPtr);
+		mPixelID = (uint32_t *) params.value("pixel_id", (uint64_t) mPixelID);
 
 		if (!(params.size() == 1 && params.contains("offset"))) {
 			printf("[NeuralRRSLoss] update hyperparams: %s\n", params.dump().c_str());
@@ -445,13 +454,16 @@ public:
 	uint32_t mStep{1};
 	uint32_t mShowLossIndex{0};
 
+	int32_t mDebugPixel{-1}; // debug training data
+
 	uint32_t mPixels{1u}; // the number of pixels
 	uint32_t mOffset{0};  // offset for read the following data
 	float *mThp;
 	float *mPdf;
 	float *mError;
 	float *mSampleWeight;
-	float *mRefMean; // this is 1 floats for each element
+	float *mRefMean;	// this is 1 floats for each element
+	uint32_t *mPixelID; // the pixel id for each element
 
 	float *mLossSumErrorGPUPtr; // the GPU address of the sum of error
 };
