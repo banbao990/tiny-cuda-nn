@@ -79,7 +79,8 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 					const T *__restrict__ predictions, const float *__restrict__ targets,
 					float *__restrict__ values, T *__restrict__ gradients,
 					const float *__restrict__ data_pdf = nullptr, const bool clampOn = false,
-					const float clampMax = 10.0f, const bool trainSigma = true
+					const float clampMax = 10.0f, const bool trainSigma = true,
+					const float gamma1 = 1.0f, const float gamma2 = 1.0f, const float gamma3 = 1.0f
 #ifdef BB_TCNN_DEBUG_MODE
 					,
 					const uint32_t showLossIndex = 0, const uint32_t *pixelID = nullptr,
@@ -91,13 +92,6 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 	if (thread_idx >= n_elements) return;
 
 	const uint32_t prediction_idx = thread_idx * stride;
-
-// #define BB_GAMMA1 8e-2f
-// #define BB_GAMMA2 1e-1f
-// #define BB_GAMMA3 1e-2f // 1e-4f
-#define BB_GAMMA1 1e-1f
-#define BB_GAMMA2 1e-1f
-#define BB_GAMMA3 0e-2f
 
 #ifdef BB_TCNN_DEBUG_MODE
 	float grad_avg = 0.0f;
@@ -128,6 +122,22 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 		// rrs *= BB_SIGMOID_SCALE;
 
 		{ // k = 1
+			const float r  = (float) predictions[prediction_idx + 0];
+			const float g  = (float) predictions[prediction_idx + 1];
+			const float b  = (float) predictions[prediction_idx + 2];
+			const float ex = (r + g + b) / 3.0f;
+
+			const uint32_t thp_idx = thread_idx * 3;
+			const float rp		   = (float) thp[thp_idx + 0];
+			const float gp		   = (float) thp[thp_idx + 1];
+			const float bp		   = (float) thp[thp_idx + 2];
+
+			const float rrs_gt_step2 = (r * rp + g * gp + b * bp) / 3.0f;
+			const float t_ref_mean	 = ref_mean[thread_idx];
+			const float rrs_center	 = (rrs_gt_step2 + t_ref_mean) / 2.0f;
+
+			// const float rrs_center = 0.0f;
+			// const float rrs_center = 1.0f;
 			const float net_data_pdf = data_pdf ? data_pdf[thread_idx] : 1.0f;
 
 			// loss
@@ -135,16 +145,15 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 			float e1						  = var - var_sum / pixels_num;
 
 			float loss_value =
-				rrs_loss_scale * (pixel_err_weight * (BB_GAMMA1 * abs(e1) + BB_GAMMA2 * var) +
-								  (BB_GAMMA3 * (rrs - 1) * (rrs - 1)));
+				rrs_loss_scale * (pixel_err_weight * (gamma1 * abs(e1) + gamma2 * var) +
+								  (gamma3 * (rrs - rrs_center) * (rrs - rrs_center)));
 			loss_value /= net_data_pdf * n_total;
 
 			values[prediction_rrs_idx] = loss_value;
 
 			// gradient
 			float dE_dvar =
-				BB_GAMMA1 * ((e1 > 0 ? 1 : -1) * (float(pixels_num - 1) / float(pixels_num))) +
-				BB_GAMMA2;
+				gamma1 * ((e1 > 0 ? 1 : -1) * (float(pixels_num - 1) / float(pixels_num))) + gamma2;
 
 			// dE_dvar /= (var + 1); // var = log(var + 1)
 
@@ -159,14 +168,10 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 
 			float path_var = 0.0f;
 			// {
-			const float r  = (float) predictions[prediction_idx + 0];
-			const float g  = (float) predictions[prediction_idx + 1];
-			const float b  = (float) predictions[prediction_idx + 2];
+
 			const float r2 = (float) predictions[prediction_idx + 3];
 			const float g2 = (float) predictions[prediction_idx + 4];
 			const float b2 = (float) predictions[prediction_idx + 5];
-
-			const float ex = (r + g + b) / 3.0f;
 
 			if (trainSigma) {
 				const float sigma =
@@ -183,12 +188,12 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 			}
 			// }
 			const float dvar_drrs = -path_pdf * path_var / max(rrs * rrs, NRRS_EPSILON);
-			float grad =
-				loss_scale * rrs_loss_scale *
-				(pixel_err_weight * (dE_dvar * rel_inv * dvar_drrs) + BB_GAMMA3 * 2 * (rrs - 1)) *
-				dactivate_drrs;
+			float grad			  = loss_scale * rrs_loss_scale *
+						 (pixel_err_weight * (dE_dvar * rel_inv * dvar_drrs) +
+						  gamma3 * 2 * (rrs - rrs_center)) *
+						 dactivate_drrs;
 
-			grad = fmaxf(-1e1f, fminf(1e1f, grad));
+			// grad = fmaxf(-1e1f, fminf(1e1f, grad));
 			grad /= net_data_pdf * n_total;
 
 			gradients[prediction_rrs_idx] = (T) (grad);
@@ -197,13 +202,13 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 			grad_avg =
 				loss_scale * rrs_loss_scale *
 				(pixel_err_weight *
-				 ((BB_GAMMA1 * ((e1 > 0 ? 1 : -1) * (float(pixels_num - 1) / float(pixels_num)))) *
+				 ((gamma1 * ((e1 > 0 ? 1 : -1) * (float(pixels_num - 1) / float(pixels_num)))) *
 				  rel_inv * dvar_drrs)) *
 				dactivate_drrs / (net_data_pdf * n_total);
 			grad_min = loss_scale * rrs_loss_scale *
-					   (pixel_err_weight * (BB_GAMMA2 * rel_inv * dvar_drrs)) * dactivate_drrs /
+					   (pixel_err_weight * (gamma2 * rel_inv * dvar_drrs)) * dactivate_drrs /
 					   (net_data_pdf * n_total);
-			grad_rrs = loss_scale * rrs_loss_scale * (BB_GAMMA3 * 2 * (rrs - 1)) * dactivate_drrs /
+			grad_rrs = loss_scale * rrs_loss_scale * (gamma3 * 2 * (rrs - 1)) * dactivate_drrs /
 					   (net_data_pdf * n_total);
 #endif
 
@@ -218,8 +223,8 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 				float o_l3 = rrs_loss_scale * (0.0f * rrs);
 
 				float dedvar_1 =
-					BB_GAMMA1 * ((e1 > 0 ? 1 : -1) * (float(pixels_num - 1) / float(pixels_num)));
-				float dedvar_2 = BB_GAMMA2;
+					gamma1 * ((e1 > 0 ? 1 : -1) * (float(pixels_num - 1) / float(pixels_num)));
+				float dedvar_2 = gamma2;
 
 				float o_grad =
 					loss_scale * rrs_loss_scale *
@@ -227,7 +232,7 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 												  (float(pixels_num - 1) / float(pixels_num))) +
 										  1.0f) *
 										 rel_inv * dvar_drrs) +
-					 BB_GAMMA3) *
+					 gamma3) *
 					dactivate_drrs;
 
 				printf(
@@ -249,9 +254,9 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 					thread_idx, grad, rrs,
 
 					//    values[prediction_rrs_idx],
-					//    (rrs_loss_scale * (pixel_err_weight * (BB_GAMMA1 * abs(e1)))),
-					//    (rrs_loss_scale * (pixel_err_weight * (BB_GAMMA2 * var))),
-					//    (rrs_loss_scale * (BB_GAMMA3 * rrs)),
+					//    (rrs_loss_scale * (pixel_err_weight * (gamma1 * abs(e1)))),
+					//    (rrs_loss_scale * (pixel_err_weight * (gamma2 * var))),
+					//    (rrs_loss_scale * (gamma3 * rrs)),
 
 					//    o_l1 + o_l2 + o_l3, o_l1, o_l2, o_l3,
 
@@ -296,6 +301,9 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 			const float bp = (float) thp[target_idx + 2];
 
 			rrs_gt = (r * rp + g * gp + b * bp) / 3.0f;
+
+			// const float refI = ref_mean[thread_idx];
+
 			// clamp
 			// rrs_gt = fmaxf(0.5f, fminf(20.0f, rrs_gt));
 			// luminance = (0.299f * r + 0.587f * g + 0.114f * b);
@@ -399,10 +407,6 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 #undef IDX
 	}
 #endif
-
-#undef BB_GAMMA1
-#undef BB_GAMMA2
-#undef BB_GAMMA3
 }
 
 template <typename T> class NeuralRRSLoss : public Loss<T> {
@@ -438,7 +442,8 @@ public:
 					  dims, loss_scale, mStep, thpPtr, pdfPtr, errorPtr, refPtr,
 					  mLossSumErrorGPUPtr, sampleWeightPtr, mPixels, prediction.data(),
 					  target.data(), values.data(), gradients.data(),
-					  data_pdf ? data_pdf->data() : nullptr, mClampOn, mClampMax, mTrainSigma
+					  data_pdf ? data_pdf->data() : nullptr, mClampOn, mClampMax, mTrainSigma,
+					  mGamma1, mGamma2, mGamma3
 #ifdef BB_TCNN_DEBUG_MODE
 					  ,
 					  mShowLossIndex, pixelIDPtr, mDebugPixel
@@ -464,6 +469,10 @@ public:
 		mLossSumErrorGPUPtr =
 			(float *) params.value("error_sum_ptr", (uint64_t) mLossSumErrorGPUPtr);
 		mPixelID = (uint32_t *) params.value("pixel_id", (uint64_t) mPixelID);
+
+		mGamma1 = params.value("gamma1", mGamma1);
+		mGamma2 = params.value("gamma2", mGamma2);
+		mGamma3 = params.value("gamma3", mGamma3);
 
 		if (!(params.size() == 1 && params.contains("offset"))) {
 			printf("[NeuralRRSLoss] update hyperparams: %s\n", params.dump().c_str());
@@ -494,6 +503,10 @@ public:
 	float *mSampleWeight;
 	float *mRefMean;	// this is 1 floats for each element
 	uint32_t *mPixelID; // the pixel id for each element
+
+	float mGamma1{1.0f};
+	float mGamma2{1.0f};
+	float mGamma3{1.0f};
 
 	float *mLossSumErrorGPUPtr; // the GPU address of the sum of error
 };
