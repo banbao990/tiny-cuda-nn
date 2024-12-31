@@ -83,8 +83,8 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 					const float gamma1 = 1.0f, const float gamma2 = 1.0f, const float gamma3 = 1.0f
 #ifdef BB_TCNN_DEBUG_MODE
 					,
-					const uint32_t showLossIndex = 0, const uint32_t *pixelID = nullptr,
-					const int32_t debugPixel = -1
+					const float *error_per_pixel = nullptr, const uint32_t showLossIndex = 0,
+					const uint32_t *pixelID = nullptr, const int32_t debugPixel = -1
 #endif
 ) {
 
@@ -97,6 +97,19 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 	float grad_avg = 0.0f;
 	float grad_min = 0.0f;
 	float grad_rrs = 0.0f;
+#endif
+
+#ifdef BB_TCNN_DEBUG_MODE
+	{
+		float c_error			= error[thread_idx];
+		uint32_t c_pixelId		= pixelID[thread_idx];
+		float c_error_per_pixel = error_per_pixel[c_pixelId];
+
+		if (c_error != c_error_per_pixel) {
+			printf("error[%d]: %g, error_per_pixel[%d]: %g\n", thread_idx, c_error, c_pixelId,
+				   c_error_per_pixel);
+		}
+	}
 #endif
 
 	if (step == 3) {
@@ -165,6 +178,7 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 			// rel_inv		  = rel_inv > 0 ? 1.0f / rel_inv : 0;
 			// TODO: this may not needed as we divided by it when use it
 			constexpr float rel_inv = 1.0f;
+			// float rel_inv = 1.0f / fmax(t_ref_mean * t_ref_mean * t_ref_mean, NRRS_EPSILON); 
 
 			float path_var = 0.0f;
 			// {
@@ -444,9 +458,10 @@ public:
 					  target.data(), values.data(), gradients.data(),
 					  data_pdf ? data_pdf->data() : nullptr, mClampOn, mClampMax, mTrainSigma,
 					  mGamma1, mGamma2, mGamma3
+
 #ifdef BB_TCNN_DEBUG_MODE
 					  ,
-					  mShowLossIndex, pixelIDPtr, mDebugPixel
+					  mErrorPerPixel, mShowLossIndex, pixelIDPtr, mDebugPixel
 #endif
 		);
 	}
@@ -469,6 +484,8 @@ public:
 		mLossSumErrorGPUPtr =
 			(float *) params.value("error_sum_ptr", (uint64_t) mLossSumErrorGPUPtr);
 		mPixelID = (uint32_t *) params.value("pixel_id", (uint64_t) mPixelID);
+
+		mErrorPerPixel = (float *) params.value("error_per_pixel", (uint64_t) mErrorPerPixel);
 
 		mGamma1 = params.value("gamma1", mGamma1);
 		mGamma2 = params.value("gamma2", mGamma2);
@@ -503,6 +520,8 @@ public:
 	float *mSampleWeight;
 	float *mRefMean;	// this is 1 floats for each element
 	uint32_t *mPixelID; // the pixel id for each element
+
+	float *mErrorPerPixel; // the error per pixel [Debug]
 
 	float mGamma1{1.0f};
 	float mGamma2{1.0f};
@@ -659,6 +678,9 @@ __global__ void neural_rrs_loss_L_L2(const uint32_t n_elements, const uint32_t s
 			// 		   loss_x2, gradient_x2, (float) predictions[i + 1], (float) predictions[i]);
 			// }
 		}
+
+		// values[i + BB_L2_OFFSET]	= 0;
+		// gradients[i + BB_L2_OFFSET] = 0;
 	}
 }
 } // namespace tcnn
