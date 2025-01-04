@@ -49,10 +49,19 @@
 namespace tcnn {
 #define NRRS_EPSILON 1e-2f
 
-__device__ inline float bb_sigma_activation(float x) {
+__device__ inline float bb_activation(float x) {
 	// x < 0: softplus(x) = log(1 + exp(x))
 	// x >= 0: 0.5 * x + ln2
 	return x < 0 ? logf(1 + expf(x)) : 0.5f * x + 0.6931471805599453f;
+}
+
+__device__ inline void bb_activation_and_gradient(float &x, float &dx) {
+	// activation: softplus & y = 0.5x + ln2
+	const float x_exp	= expf(x);
+	const bool x_is_neg = x < 0;
+	const float ln2		= 0.6931471805599453f;
+	x					= x_is_neg ? (logf(x_exp + 1.0f)) : (0.5f * x + ln2);
+	dx					= x_is_neg ? (x_exp / (1.0f + x_exp)) : 0.5f;
 }
 
 template <typename T>
@@ -128,6 +137,8 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 		const float pixel_err_weight = sample_weight[thread_idx];
 
 		float dactivate_drrs = 1.0f;
+		bb_activation_and_gradient(rrs, dactivate_drrs);
+
 		// sigmoid, s(x) = 1 / (1 + exp(-x))
 		// s'(x) = s(x) * (1 - s(x))
 		// rrs					 = 1.0f / (1.0f + expf(-rrs));
@@ -147,7 +158,8 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 
 			const float rrs_gt_step2 = (r * rp + g * gp + b * bp) / 3.0f;
 			const float t_ref_mean	 = ref_mean[thread_idx];
-			const float rrs_center	 = (rrs_gt_step2 + t_ref_mean) / 2.0f;
+			const float rrs_center	 = t_ref_mean;
+			// const float rrs_center = (rrs_gt_step2 + t_ref_mean) / 2.0f;
 
 			// const float rrs_center = 0.0f;
 			// const float rrs_center = 1.0f;
@@ -177,8 +189,8 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 			// rel_inv		  = max(rel_inv * rel_inv, 1e-4f);
 			// rel_inv		  = rel_inv > 0 ? 1.0f / rel_inv : 0;
 			// TODO: this may not needed as we divided by it when use it
-			constexpr float rel_inv = 1.0f;
-			// float rel_inv = 1.0f / fmax(t_ref_mean * t_ref_mean * t_ref_mean, NRRS_EPSILON); 
+			// constexpr float rel_inv = 1.0f;
+			float rel_inv = 1.0f / fmax(t_ref_mean * t_ref_mean * t_ref_mean, NRRS_EPSILON);
 
 			float path_var = 0.0f;
 			// {
@@ -189,8 +201,7 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 
 			if (trainSigma) {
 				const float sigma =
-					(bb_sigma_activation(r2) + bb_sigma_activation(g2) + bb_sigma_activation(b2)) /
-					3.0f;
+					(bb_activation(r2) + bb_activation(g2) + bb_activation(b2)) / 3.0f;
 				// S : sigma*sigma
 				// RR: ex2
 				float ex_ex = (rrs >= 1.0f) ? 0.0f : ex * ex;
@@ -230,7 +241,8 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 			const bool should_debug =
 				(debugPixel != -1) && (pixelID != nullptr) && (pixelID[thread_idx] == debugPixel);
 			// check nan
-			if (should_debug || isnan(grad) || isinf(grad) || isnan(rrs) || abs(grad) >= 1e2) {
+			if (should_debug || isnan(grad) || isinf(grad) || isnan(rrs) || abs(grad) >= 1e2 ||
+				rrs < 0) {
 				// check loss
 				float o_l1 = rrs_loss_scale * (pixel_err_weight * (1.0f * abs(e1)));
 				float o_l2 = rrs_loss_scale * (pixel_err_weight * (1.0f * var));
@@ -333,6 +345,7 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 		// const float prediction = log1pf(prediction_ori_exp);
 		float prediction	 = prediction_ori;
 		float dactivate_drrs = 1.0f;
+		bb_activation_and_gradient(prediction, dactivate_drrs);
 
 		// prediction	   = 1.0f / (1.0f + expf(-prediction_ori));
 		// dactivate_drrs = prediction * (1.0f - prediction) * BB_SIGMOID_SCALE;
@@ -605,11 +618,8 @@ __global__ void neural_rrs_loss_L_L2(const uint32_t n_elements, const uint32_t s
 			// loss = (mean - x)*(mean - x) / (2 * sigma*sigma) + log(sigma)
 
 			// activation: softplus & y = 0.5x + ln2
-			const float sigma_exp = expf(sigma_raw);
-			// const float dsigma_dsigma_raw = sigma_exp / (1.0f + sigma_exp);
-			const bool sigma_is_neg = sigma_raw < 0;
-			const float sigma = sigma_is_neg ? (logf(sigma_exp + 1.0f)) : (0.5f * sigma_raw + ln2);
-			const float dsigma_dsigma_raw = sigma_is_neg ? (sigma_exp / (1.0f + sigma_exp)) : 0.5f;
+			float sigma, dsigma_dsigma_raw;
+			bb_activation_and_gradient(sigma, dsigma_dsigma_raw);
 
 			const float sigma2 = sigma * sigma;
 
