@@ -9,13 +9,15 @@
 
 namespace tcnn {
 
+#define LL2_STRIDE 6
+
 template <typename T>
 __global__ void
 nrrs_rrs_loss(const uint32_t n_elements, const uint32_t dims, const float loss_scale,
 			  const uint32_t step, const float *__restrict__ thp, const float *__restrict__ pdf,
 			  const float *__restrict__ error, const float *__restrict__ ref_mean,
 			  const float *__restrict__ error_sum, const float *__restrict__ sample_weight,
-			  const float *__restrict__ ll2, const uint32_t pixels_num,
+			  const __half *__restrict__ ll2, const uint32_t pixels_num,
 			  const T *__restrict__ predictions, const float *__restrict__ targets,
 			  float *__restrict__ values, T *__restrict__ gradients,
 			  const float *__restrict__ data_pdf = nullptr, const bool clampOn = false,
@@ -68,7 +70,7 @@ nrrs_rrs_loss(const uint32_t n_elements, const uint32_t dims, const float loss_s
 		// const float rrs_loss_scale = 1e-3;
 		// const uint32_t n_total	   = 1;
 
-		float rrs					 = (float) predictions[prediction_idx + OUTPUT_RRS_OFFSET];
+		float rrs					 = (float) predictions[prediction_idx];
 		float var					 = error[thread_idx];
 		float path_pdf				 = pdf[thread_idx];
 		const float pixel_err_weight = sample_weight[thread_idx];
@@ -83,35 +85,37 @@ nrrs_rrs_loss(const uint32_t n_elements, const uint32_t dims, const float loss_s
 		// rrs *= BB_SIGMOID_SCALE;
 
 		{ // k = 1
-			const float r  = (float) predictions[prediction_idx + 0];
-			const float g  = (float) predictions[prediction_idx + 1];
-			const float b  = (float) predictions[prediction_idx + 2];
+			const uint32_t ll2_idx = thread_idx * LL2_STRIDE;
+
+			const float r  = max((float) ll2[ll2_idx + 0], 0.0f);
+			const float g  = max((float) ll2[ll2_idx + 1], 0.0f);
+			const float b  = max((float) ll2[ll2_idx + 2], 0.0f);
 			const float ex = (r + g + b) / 3.0f;
 
 			const uint32_t thp_idx = thread_idx * 3;
-			const float rp		   = (float) thp[thp_idx + 0];
-			const float gp		   = (float) thp[thp_idx + 1];
-			const float bp		   = (float) thp[thp_idx + 2];
+
+			const float rp = thp[thp_idx + 0];
+			const float gp = thp[thp_idx + 1];
+			const float bp = thp[thp_idx + 2];
 
 			const float rrs_gt_step2 = (r * rp + g * gp + b * bp) / 3.0f;
 			const float t_ref_mean	 = ref_mean[thread_idx];
-			const float rrs_center	 = t_ref_mean;
-			// const float rrs_center = (rrs_gt_step2 + t_ref_mean) / 2.0f;
+			// const float rrs_center	 = t_ref_mean;
+			const float rrs_center = (rrs_gt_step2 + t_ref_mean) / 2.0f;
 
 			// const float rrs_center = 0.0f;
 			// const float rrs_center = 1.0f;
 			const float net_data_pdf = data_pdf ? data_pdf[thread_idx] : 1.0f;
 
 			// loss
-			const uint32_t prediction_rrs_idx = prediction_idx + 6;
-			float e1						  = var - var_sum / pixels_num;
+			float e1 = var - var_sum / pixels_num;
 
 			float loss_value =
 				rrs_loss_scale * (pixel_err_weight * (gamma1 * abs(e1) + gamma2 * var) +
 								  (gamma3 * (rrs - rrs_center) * (rrs - rrs_center)));
 			loss_value /= net_data_pdf * n_total;
 
-			values[prediction_rrs_idx] = loss_value;
+			values[prediction_idx] = loss_value;
 
 			// gradient
 			float dE_dvar =
@@ -132,9 +136,9 @@ nrrs_rrs_loss(const uint32_t n_elements, const uint32_t dims, const float loss_s
 			float path_var = 0.0f;
 			// {
 
-			const float r2 = (float) predictions[prediction_idx + 3];
-			const float g2 = (float) predictions[prediction_idx + 4];
-			const float b2 = (float) predictions[prediction_idx + 5];
+			const float r2 = max((float) ll2[ll2_idx + 3], 0.0f);
+			const float g2 = max((float) ll2[ll2_idx + 4], 0.0f);
+			const float b2 = max((float) ll2[ll2_idx + 5], 0.0f);
 
 			if (trainSigma) {
 				const float sigma =
@@ -143,6 +147,7 @@ nrrs_rrs_loss(const uint32_t n_elements, const uint32_t dims, const float loss_s
 				// RR: ex2
 				float ex_ex = (rrs >= 1.0f) ? 0.0f : ex * ex;
 				path_var	= sigma * sigma + ex_ex;
+				path_var	= max(path_var, 0.0f);
 			} else {
 				const float out2 = (r2 + g2 + b2) / 3.0f;
 				float ex_ex		 = (rrs >= 1.0f) ? ex * ex : 0.0f;
@@ -158,7 +163,7 @@ nrrs_rrs_loss(const uint32_t n_elements, const uint32_t dims, const float loss_s
 			// grad = fmaxf(-1e1f, fminf(1e1f, grad));
 			grad /= net_data_pdf * n_total;
 
-			gradients[prediction_rrs_idx] = (T) (grad);
+			gradients[prediction_idx] = (T) (grad);
 
 #ifdef BB_TCNN_DEBUG_MODE
 			grad_avg =
@@ -216,7 +221,7 @@ nrrs_rrs_loss(const uint32_t n_elements, const uint32_t dims, const float loss_s
 
 					thread_idx, grad, rrs,
 
-					//    values[prediction_rrs_idx],
+					//    values[prediction_idx],
 					//    (rrs_loss_scale * (pixel_err_weight * (gamma1 * abs(e1)))),
 					//    (rrs_loss_scale * (pixel_err_weight * (gamma2 * var))),
 					//    (rrs_loss_scale * (gamma3 * rrs)),
@@ -246,6 +251,9 @@ nrrs_rrs_loss(const uint32_t n_elements, const uint32_t dims, const float loss_s
 #endif
 		}
 
+		// values[prediction_idx]	  = 0;
+		// gradients[prediction_idx] = 0;
+
 	} else {
 		const uint32_t thp_idx	  = thread_idx * 3; // thp: dim = 3
 		const uint32_t target_idx = thread_idx;		// dim3 = 1
@@ -255,13 +263,14 @@ nrrs_rrs_loss(const uint32_t n_elements, const uint32_t dims, const float loss_s
 		// float luminance = 1.0f;
 		if (step == 1) {
 			// set all rrs = 1
+			rrs_gt = ref_mean[thread_idx];
 		} else if (step == 2) {
 			// step 2: ADRRS
-			const uint32_t ll2_idx = thread_idx * 6;
+			const uint32_t ll2_idx = thread_idx * LL2_STRIDE;
 
-			const float r  = ll2[ll2_idx + 0];
-			const float g  = ll2[ll2_idx + 1];
-			const float b  = ll2[ll2_idx + 2];
+			const float r  = max((float) ll2[ll2_idx + 0], 0.0f);
+			const float g  = max((float) ll2[ll2_idx + 1], 0.0f);
+			const float b  = max((float) ll2[ll2_idx + 2], 0.0f);
 			const float rp = thp[thp_idx + 0];
 			const float gp = thp[thp_idx + 1];
 			const float bp = thp[thp_idx + 2];
@@ -275,9 +284,7 @@ nrrs_rrs_loss(const uint32_t n_elements, const uint32_t dims, const float loss_s
 			// luminance = (0.299f * r + 0.587f * g + 0.114f * b);
 		}
 
-		const uint32_t prediction_rrs_idx = prediction_idx;
-
-		const float prediction_ori = (float) predictions[prediction_rrs_idx];
+		const float prediction_ori = (float) predictions[prediction_idx];
 		// activation: sigmoid
 		// const float prediction = 1.0f / (1.0f + expf(-prediction_ori));
 		// activation: softplus
@@ -305,14 +312,14 @@ nrrs_rrs_loss(const uint32_t n_elements, const uint32_t dims, const float loss_s
 		if (clampOn) {
 			scale = v > clampMax ? clampMax / v : 1.0f;
 		}
-		values[prediction_rrs_idx] = BB_RRS_LOSS_SCALE_STEP2 * scale * v;
+		values[prediction_idx] = BB_RRS_LOSS_SCALE_STEP2 * scale * v;
 
 		float gradient = 2 * difference / prediction_sq_plus_epsilon / pdf;
 		// sigmoid
 		// gradient *= prediction * (1.0f - prediction);
 		// softplus
 		// gradient *= prediction_ori_exp / (1.0f + prediction_ori_exp);
-		gradients[prediction_rrs_idx] =
+		gradients[prediction_idx] =
 			(T) (BB_RRS_LOSS_SCALE_STEP2 * scale * loss_scale * gradient / n_total);
 
 		// if (isnan(v) || isinf(v) || isnan(gradient) || isinf(gradient)) {
@@ -352,7 +359,7 @@ nrrs_rrs_loss(const uint32_t n_elements, const uint32_t dims, const float loss_s
 				sum += values[IDX(i)];
 			}
 		} else if (showLossIndex == 3) {
-			sum = values[IDX(OUTPUT_RRS_OFFSET)];
+			sum = values[IDX(0)];
 		} else if (showLossIndex == 4) {
 			for (int i = 0; i < 7; ++i) {
 				sum += (float) gradients[IDX(i)];
@@ -396,9 +403,10 @@ public:
 		const float *pdfPtr			 = mPdf + mOffset * 3;			// 3 float
 		const float *errorPtr		 = mError + mOffset * 1;		// 1 float
 		const float *sampleWeightPtr = mSampleWeight + mOffset * 1; // 1 float
-		const float *ll2Ptr			 = mLL2 + mOffset * 6;			// 6 float
 		const float *refPtr			 = mRefMean + mOffset * 1;		// 1 float
 		const uint32_t *pixelIDPtr	 = mPixelID + mOffset * 1;		// 1 uint32_t
+
+		const __half *ll2Ptr = mLL2; // update each training batch
 
 		linear_kernel(nrrs_rrs_loss<T>, 0, stream, prediction.n_elements() / stride, dims,
 					  loss_scale, mStep, thpPtr, pdfPtr, errorPtr, refPtr, mLossSumErrorGPUPtr,
@@ -428,7 +436,7 @@ public:
 		mError		  = (float *) params.value("error", (uint64_t) mError);
 		mRefMean	  = (float *) params.value("ref_mean", (uint64_t) mRefMean);
 		mSampleWeight = (float *) params.value("sample_weight", (uint64_t) mSampleWeight);
-		mLL2		  = (float *) params.value("ll2", (uint64_t) mLL2);
+		mLL2		  = (__half *) params.value("ll2", (uint64_t) mLL2);
 		mLossSumErrorGPUPtr =
 			(float *) params.value("error_sum_ptr", (uint64_t) mLossSumErrorGPUPtr);
 		mPixelID = (uint32_t *) params.value("pixel_id", (uint64_t) mPixelID);
@@ -466,7 +474,7 @@ public:
 	float *mPdf;
 	float *mError;
 	float *mSampleWeight;
-	float *mLL2;		// the l,l2 for each element
+	__half *mLL2;		// the l,l2 for each element
 	float *mRefMean;	// this is 1 floats for each element
 	uint32_t *mPixelID; // the pixel id for each element
 

@@ -6,7 +6,6 @@
 #define BB_SIGMOID_SCALE 20.0f
 #define BB_L2_OFFSET 3
 #define BB_SIGMA_OFFSET 3
-#define OUTPUT_RRS_OFFSET 0
 
 #define NRRS_EPSILON 1e-2f
 
