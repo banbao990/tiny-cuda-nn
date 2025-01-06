@@ -1,33 +1,5 @@
-/*
- * Copyright (c) 2020-2023, NVIDIA CORPORATION.  All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without modification, are permitted
- * provided that the following conditions are met:
- *     * Redistributions of source code must retain the above copyright notice, this list of
- *       conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright notice, this list of
- *       conditions and the following disclaimer in the documentation and/or other materials
- *       provided with the distribution.
- *     * Neither the name of the NVIDIA CORPORATION nor the names of its contributors may be used
- *       to endorse or promote products derived from this software without specific prior written
- *       permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR
- * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
- * FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL NVIDIA CORPORATION BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
- * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
- * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TOR (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- */
-
-/** @file   rrs_loss.h
- *  @author banbao990, PKU
- *  @brief Neural-RRS Loss
- */
-
 #pragma once
+#include "nrrs.h"
 
 #include <tiny-cuda-nn/common.h>
 #include <tiny-cuda-nn/gpu_matrix.h>
@@ -35,71 +7,31 @@
 #include <tiny-cuda-nn/loss.h>
 #include <tiny-cuda-nn/reduce_sum.h>
 
-// #define BB_NLL
-
-#define BB_TCNN_DEBUG_MODE
-// #undef BB_TCNN_DEBUG_MODE
-
-#define BB_RRS_LOSS_SCALE_STEP2 1e0f
-#define BB_SIGMOID_SCALE 20.0f
-#define BB_L2_OFFSET 3
-#define BB_SIGMA_OFFSET 3
-#define OUTPUT_RRS_OFFSET 6
-
 namespace tcnn {
-#define NRRS_EPSILON 1e-2f
-
-__device__ inline float bb_activation(float x) {
-	// x < 0: softplus(x) = log(1 + exp(x))
-	// x >= 0: 0.5 * x + ln2
-	return x < 0 ? logf(1 + expf(x)) : 0.5f * x + 0.6931471805599453f;
-}
-
-__device__ inline void bb_activation_and_gradient(float &x, float &dx) {
-	// activation: softplus & y = 0.5x + ln2
-	const float x_exp	= expf(x);
-	const bool x_is_neg = x < 0;
-	const float ln2		= 0.6931471805599453f;
-	x					= x_is_neg ? (logf(x_exp + 1.0f)) : (0.5f * x + ln2);
-	dx					= x_is_neg ? (x_exp / (1.0f + x_exp)) : 0.5f;
-}
 
 template <typename T>
 __global__ void
-neural_rrs_loss_L_L2(const uint32_t n_elements, const uint32_t stride, const uint32_t dims,
-					 const float loss_scale, const T *__restrict__ predictions,
-					 const float *__restrict__ targets, float *__restrict__ values,
-					 T *__restrict__ gradients, const float *__restrict__ data_pdf = nullptr,
-					 const bool trainSigma = true, const bool clampOn = false,
-					 const float clampMax = 10.0f, const uint32_t step = 1
+nrrs_rrs_loss(const uint32_t n_elements, const uint32_t dims, const float loss_scale,
+			  const uint32_t step, const float *__restrict__ thp, const float *__restrict__ pdf,
+			  const float *__restrict__ error, const float *__restrict__ ref_mean,
+			  const float *__restrict__ error_sum, const float *__restrict__ sample_weight,
+			  const float *__restrict__ ll2, const uint32_t pixels_num,
+			  const T *__restrict__ predictions, const float *__restrict__ targets,
+			  float *__restrict__ values, T *__restrict__ gradients,
+			  const float *__restrict__ data_pdf = nullptr, const bool clampOn = false,
+			  const float clampMax = 10.0f, const bool trainSigma = true, const float gamma1 = 1.0f,
+			  const float gamma2 = 1.0f, const float gamma3 = 1.0f
 #ifdef BB_TCNN_DEBUG_MODE
-					 ,
-					 const uint32_t showLossIndex = 0
-#endif
-);
-
-template <typename T>
-__global__ void
-neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint32_t dims,
-					const float loss_scale, const uint32_t step, const float *__restrict__ thp,
-					const float *__restrict__ pdf, const float *__restrict__ error,
-					const float *__restrict__ ref_mean, const float *__restrict__ error_sum,
-					const float *__restrict__ sample_weight, const uint32_t pixels_num,
-					const T *__restrict__ predictions, const float *__restrict__ targets,
-					float *__restrict__ values, T *__restrict__ gradients,
-					const float *__restrict__ data_pdf = nullptr, const bool clampOn = false,
-					const float clampMax = 10.0f, const bool trainSigma = true,
-					const float gamma1 = 1.0f, const float gamma2 = 1.0f, const float gamma3 = 1.0f
-#ifdef BB_TCNN_DEBUG_MODE
-					,
-					const float *error_per_pixel = nullptr, const uint32_t showLossIndex = 0,
-					const uint32_t *pixelID = nullptr, const int32_t debugPixel = -1
+			  ,
+			  const float *error_per_pixel = nullptr, const uint32_t showLossIndex = 0,
+			  const uint32_t *pixelID = nullptr, const int32_t debugPixel = -1
 #endif
 ) {
 
 	const uint32_t thread_idx = threadIdx.x + blockIdx.x * blockDim.x;
 	if (thread_idx >= n_elements) return;
 
+	constexpr uint32_t stride	  = 16;
 	const uint32_t prediction_idx = thread_idx * stride;
 
 #ifdef BB_TCNN_DEBUG_MODE
@@ -108,20 +40,25 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 	float grad_rrs = 0.0f;
 #endif
 
-#ifdef BB_TCNN_DEBUG_MODE
-	{
-		float c_error			= error[thread_idx];
-		uint32_t c_pixelId		= pixelID[thread_idx];
-		float c_error_per_pixel = error_per_pixel[c_pixelId];
-
-		if (c_error != c_error_per_pixel) {
-			printf("error[%d]: %g, error_per_pixel[%d]: %g\n", thread_idx, c_error, c_pixelId,
-				   c_error_per_pixel);
-		}
+	for (int i = 1; i < stride; i++) {
+		values[prediction_idx + i]	  = 0;
+		gradients[prediction_idx + i] = 0;
 	}
-#endif
 
 	if (step == 3) {
+
+#ifdef BB_TCNN_DEBUG_MODE
+		{
+			float c_error			= error[thread_idx];
+			uint32_t c_pixelId		= pixelID[thread_idx];
+			float c_error_per_pixel = error_per_pixel[c_pixelId];
+
+			if (c_error != c_error_per_pixel) {
+				printf("error[%d]: %g, error_per_pixel[%d]: %g\n", thread_idx, c_error, c_pixelId,
+					   c_error_per_pixel);
+			}
+		}
+#endif
 		// now the output is rrs
 		const float var_sum = *error_sum;
 
@@ -310,7 +247,8 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 		}
 
 	} else {
-		const uint32_t target_idx = thread_idx * 3; // thp: dim = 3
+		const uint32_t thp_idx	  = thread_idx * 3; // thp: dim = 3
+		const uint32_t target_idx = thread_idx;		// dim3 = 1
 
 		float rrs_gt			   = 1.0f;
 		const float rrs_loss_scale = 1.0f;
@@ -319,12 +257,14 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 			// set all rrs = 1
 		} else if (step == 2) {
 			// step 2: ADRRS
-			const float r  = (float) predictions[prediction_idx + 0];
-			const float g  = (float) predictions[prediction_idx + 1];
-			const float b  = (float) predictions[prediction_idx + 2];
-			const float rp = (float) thp[target_idx + 0];
-			const float gp = (float) thp[target_idx + 1];
-			const float bp = (float) thp[target_idx + 2];
+			const uint32_t ll2_idx = thread_idx * 6;
+
+			const float r  = ll2[ll2_idx + 0];
+			const float g  = ll2[ll2_idx + 1];
+			const float b  = ll2[ll2_idx + 2];
+			const float rp = thp[thp_idx + 0];
+			const float gp = thp[thp_idx + 1];
+			const float bp = thp[thp_idx + 2];
 
 			rrs_gt = (r * rp + g * gp + b * bp) / 3.0f;
 
@@ -335,7 +275,7 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 			// luminance = (0.299f * r + 0.587f * g + 0.114f * b);
 		}
 
-		const uint32_t prediction_rrs_idx = prediction_idx + OUTPUT_RRS_OFFSET;
+		const uint32_t prediction_rrs_idx = prediction_idx;
 
 		const float prediction_ori = (float) predictions[prediction_rrs_idx];
 		// activation: sigmoid
@@ -352,6 +292,7 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 		// prediction *= BB_SIGMOID_SCALE;
 
 		const float difference = rrs_loss_scale * dactivate_drrs * (prediction - rrs_gt);
+
 		const uint32_t n_total = n_elements; // /stride; // why error?
 		const float pdf		   = data_pdf ? data_pdf[target_idx] : 1;
 
@@ -436,7 +377,7 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 #endif
 }
 
-template <typename T> class NeuralRRSLoss : public Loss<T> {
+template <typename T> class NRRSRRSLoss : public Loss<T> {
 public:
 	void evaluate(cudaStream_t stream, const float loss_scale, const GPUMatrix<T> &prediction,
 				  const GPUMatrix<float> &target, GPUMatrix<float> &values, GPUMatrix<T> &gradients,
@@ -449,28 +390,21 @@ public:
 		CHECK_THROW(gradients.m() == stride);
 		CHECK_THROW(!data_pdf || data_pdf->m() == dims);
 
-		linear_kernel(neural_rrs_loss_L_L2<T>, 0, stream, prediction.n_elements(), stride, dims,
-					  loss_scale, prediction.data(), target.data(), values.data(), gradients.data(),
-					  data_pdf ? data_pdf->data() : nullptr, mTrainSigma, mClampOn, mClampMax, mStep
-#ifdef BB_TCNN_DEBUG_MODE
-					  ,
-					  mShowLossIndex
-#endif
-		);
+		CHECK_THROW(stride == 16);
 
 		const float *thpPtr			 = mThp + mOffset * 3;			// 3 float
 		const float *pdfPtr			 = mPdf + mOffset * 3;			// 3 float
 		const float *errorPtr		 = mError + mOffset * 1;		// 1 float
 		const float *sampleWeightPtr = mSampleWeight + mOffset * 1; // 1 float
+		const float *ll2Ptr			 = mLL2 + mOffset * 6;			// 6 float
 		const float *refPtr			 = mRefMean + mOffset * 1;		// 1 float
 		const uint32_t *pixelIDPtr	 = mPixelID + mOffset * 1;		// 1 uint32_t
 
-		linear_kernel(neural_rrs_loss_rrs<T>, 0, stream, prediction.n_elements() / stride, stride,
-					  dims, loss_scale, mStep, thpPtr, pdfPtr, errorPtr, refPtr,
-					  mLossSumErrorGPUPtr, sampleWeightPtr, mPixels, prediction.data(),
-					  target.data(), values.data(), gradients.data(),
-					  data_pdf ? data_pdf->data() : nullptr, mClampOn, mClampMax, mTrainSigma,
-					  mGamma1, mGamma2, mGamma3
+		linear_kernel(nrrs_rrs_loss<T>, 0, stream, prediction.n_elements() / stride, dims,
+					  loss_scale, mStep, thpPtr, pdfPtr, errorPtr, refPtr, mLossSumErrorGPUPtr,
+					  sampleWeightPtr, ll2Ptr, mPixels, prediction.data(), target.data(),
+					  values.data(), gradients.data(), data_pdf ? data_pdf->data() : nullptr,
+					  mClampOn, mClampMax, mTrainSigma, mGamma1, mGamma2, mGamma3
 
 #ifdef BB_TCNN_DEBUG_MODE
 					  ,
@@ -494,6 +428,7 @@ public:
 		mError		  = (float *) params.value("error", (uint64_t) mError);
 		mRefMean	  = (float *) params.value("ref_mean", (uint64_t) mRefMean);
 		mSampleWeight = (float *) params.value("sample_weight", (uint64_t) mSampleWeight);
+		mLL2		  = (float *) params.value("ll2", (uint64_t) mLL2);
 		mLossSumErrorGPUPtr =
 			(float *) params.value("error_sum_ptr", (uint64_t) mLossSumErrorGPUPtr);
 		mPixelID = (uint32_t *) params.value("pixel_id", (uint64_t) mPixelID);
@@ -505,7 +440,7 @@ public:
 		mGamma3 = params.value("gamma3", mGamma3);
 
 		if (!(params.size() == 1 && params.contains("offset"))) {
-			printf("[NeuralRRSLoss] update hyperparams: %s\n", params.dump().c_str());
+			printf("[NRRS_RRS Loss] update hyperparams: %s\n", params.dump().c_str());
 		}
 	}
 
@@ -531,7 +466,7 @@ public:
 	float *mPdf;
 	float *mError;
 	float *mSampleWeight;
-	
+	float *mLL2;		// the l,l2 for each element
 	float *mRefMean;	// this is 1 floats for each element
 	uint32_t *mPixelID; // the pixel id for each element
 
@@ -544,157 +479,6 @@ public:
 	float *mLossSumErrorGPUPtr; // the GPU address of the sum of error
 };
 
-template <typename T>
-__global__ void neural_rrs_loss_L_L2(const uint32_t n_elements, const uint32_t stride,
-									 const uint32_t dims, const float loss_scale,
-									 const T *__restrict__ predictions,
-									 const float *__restrict__ targets, float *__restrict__ values,
-									 T *__restrict__ gradients, const float *__restrict__ data_pdf,
-									 const bool trainSigma, const bool clampOn,
-									 const float clampMax, const uint32_t step
-#ifdef BB_TCNN_DEBUG_MODE
-									 ,
-									 const uint32_t showLossIndex
-#endif
-) {
-
-	const uint32_t j = threadIdx.x + blockIdx.x * blockDim.x;
-	if (j >= n_elements) return;
-
-	const uint32_t i = j;
-
-	const uint32_t intra_elem_idx = i % stride;
-	const uint32_t inter_elem_idx = i / stride;
-	const uint32_t training_dims  = 6; // orignial is dims
-	const uint32_t calc_dims	  = 3; // x calc data(x) & data(x+1)
-
-	if (intra_elem_idx >= training_dims) {
-		values[i]	 = 0;
-		gradients[i] = 0;
-		return;
-	}
-	if (intra_elem_idx >= calc_dims) return; // the difference is not set 0
-
-	// TODO: optimize, now only 3 thread is active
-
-	const uint32_t target_idx = inter_elem_idx * dims + intra_elem_idx;
-	const uint32_t n_total	  = n_elements / stride * calc_dims;
-	const float pdf			  = data_pdf ? data_pdf[target_idx] : 1;
-
-	{
-		const float target = targets[target_idx];
-
-		// #####[mean]
-		// no activation for mean
-		const float mean = (float) predictions[i];
-
-		const float prediction_sq_plus_epsilon = mean * mean + NRRS_EPSILON;
-		const float diff					   = mean - target;
-		const float diff2					   = diff * diff;
-
-		float loss_mean = diff2 / prediction_sq_plus_epsilon / pdf / n_total;
-
-		float scale_mean = 1.0f;
-		if (clampOn) {
-			scale_mean = loss_mean > clampMax ? clampMax / loss_mean : 1.0f;
-		}
-
-		loss_mean = scale_mean * loss_mean;
-		values[i] = loss_mean;
-
-		float grad_mean = scale_mean * 2 * diff / prediction_sq_plus_epsilon;
-		grad_mean		= grad_mean / pdf / n_total;
-		gradients[i]	= (T) (loss_scale * grad_mean);
-
-		// if (isnan(loss_mean) || isinf(loss_mean) || isnan(grad_mean) || isinf(grad_mean)) {
-		// 	printf("L [%d]: loss_mean = %g, grad_mean = %g, prediction = %g\n", i, loss_mean,
-		// 		   grad_mean, (float) predictions[i]);
-		// }
-
-		if (trainSigma) {
-			// #####[sigma]
-			const float sigma_raw = (float) predictions[i + BB_SIGMA_OFFSET];
-			// NLL
-			// loss = (mean - x)*(mean - x) / (2 * sigma*sigma) + log(sigma)
-
-			// activation: softplus & y = 0.5x + ln2
-			float sigma = sigma_raw;
-			float dsigma_dsigma_raw;
-			bb_activation_and_gradient(sigma, dsigma_dsigma_raw);
-
-			const float sigma2 = sigma * sigma;
-
-			// [TODO] infact, during training, we just need gradient
-			float loss_sigma =
-				(diff2 / (2 * sigma2 + NRRS_EPSILON) + logf(sigma + NRRS_EPSILON)) / pdf / n_total;
-
-			float scale_sigma = 1.0f;
-			if (clampOn) {
-				scale_sigma = loss_sigma > clampMax ? clampMax / scale_sigma : 1.0f;
-			}
-
-			values[i + BB_L2_OFFSET] = scale_sigma * loss_sigma;
-
-			// d(loss)/d(sigma)
-			float grad_sigma = scale_sigma * (1 / (sigma + NRRS_EPSILON) -
-											  diff2 / (sigma2 * sigma + NRRS_EPSILON));
-
-			grad_sigma					= grad_sigma * dsigma_dsigma_raw / pdf / n_total;
-			gradients[i + BB_L2_OFFSET] = (T) (loss_scale * grad_sigma);
-			/*
-			if (
-
-				// i < 100 ||
-
-				isnan(loss_mean) || isinf(loss_mean) || isnan(grad_mean) || isinf(grad_mean) ||
-				isnan(grad_sigma) || isinf(grad_sigma)) {
-				printf("Sigma [%d]: (raw/act/exp/d_d) mean = -/%g/-/-, sigma = %g/%g/%g/%g, loss =
-			%g, " "gradient = %g/%g, prediction = %g, " "diff = %g\n", i,
-
-					   mean,
-
-					   sigma_raw, sigma, sigma_exp, dsigma_dsigma_raw,
-
-					   loss_mean, grad_mean, grad_sigma, (float) predictions[i],
-
-					   diff);
-			}
-			*/
-		} else {
-			// #####[X2]
-			float scale_x2 = 0.01f;
-			const float x2 = (float) predictions[i + BB_L2_OFFSET];
-			// const float target_x2 = (float) targets[target_idx + BB_L2_OFFSET];
-			const float target_x2		   = target * target;
-			const float x2_sq_plus_epsilon = x2 * x2 + NRRS_EPSILON;
-			const float diff_x2			   = x2 - target_x2;
-
-			float loss_x2 = scale_x2 * diff_x2 * diff_x2 / x2_sq_plus_epsilon / pdf / n_total;
-			if (clampOn) {
-				const float scale1 = loss_x2 > clampMax ? clampMax / loss_x2 : 1.0f;
-				loss_x2 *= scale1;
-				scale_x2 *= scale1;
-			}
-
-			// if nan, set to 0
-			bool loss_x2_is_nan			= isnan(loss_x2);
-			values[i + BB_L2_OFFSET]	= loss_x2_is_nan ? 0 : loss_x2;
-			float gradient_x2			= 2 * diff_x2 / x2_sq_plus_epsilon / pdf;
-			gradient_x2					= scale_x2 * loss_scale * gradient_x2 / n_total;
-			gradients[i + BB_L2_OFFSET] = (T) (loss_x2_is_nan ? 0 : gradient_x2);
-
-			// check nan
-			// if (isnan(loss_x2) || isinf(loss_x2) || isnan(gradient_x2) || isinf(gradient_x2)) {
-			// 	printf("L2 [%d]: loss_x2 = %g, gradient_x2 = %g, prediction = %g, L2 = %g\n", i,
-			// 		   loss_x2, gradient_x2, (float) predictions[i + 1], (float) predictions[i]);
-			// }
-		}
-
-		// values[i + BB_L2_OFFSET]	= 0;
-		// gradients[i + BB_L2_OFFSET] = 0;
-	}
-}
 } // namespace tcnn
 
-#undef BB_NLL
 #undef BB_TCNN_DEBUG_MODE

@@ -39,6 +39,9 @@
 #include <tiny-cuda-nn/losses/cross_entropy.h>
 #include <tiny-cuda-nn/losses/variance_is.h>
 #include <tiny-cuda-nn/losses/neural_rrs.h>
+#include <tiny-cuda-nn/losses/nrrs_ll2.h>
+#include <tiny-cuda-nn/losses/nrrs_rrs.h>
+
 
 namespace tcnn {
 
@@ -65,6 +68,8 @@ auto register_builtin_losses() {
 	register_loss<T>(factories, "CrossEntropy", [](const json& loss) { return new CrossEntropyLoss<T>{}; });
 	register_loss<T>(factories, "Variance", [](const json& loss) { return new VarianceIsLoss<T>{}; });
 	register_loss<T>(factories, "NeuralRRS", [](const json& loss) { return new NeuralRRSLoss<T>{}; });
+	register_loss<T>(factories, "NRRS_LL2", [](const json& loss) { return new NRRSLL2Loss<T>{}; });
+	register_loss<T>(factories, "NRRS_RRS", [](const json& loss) { return new NRRSRRSLoss<T>{}; });
 
 	return factories;
 }
