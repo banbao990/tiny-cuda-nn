@@ -151,14 +151,14 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 			const float b  = (float) predictions[prediction_idx + 2];
 			const float ex = (r + g + b) / 3.0f;
 
-			const uint32_t thp_idx = thread_idx * 3;
-			const float rp		   = (float) thp[thp_idx + 0];
-			const float gp		   = (float) thp[thp_idx + 1];
-			const float bp		   = (float) thp[thp_idx + 2];
+			// const uint32_t thp_idx = thread_idx * 3;
+			// const float rp		   = (float) thp[thp_idx + 0];
+			// const float gp		   = (float) thp[thp_idx + 1];
+			// const float bp		   = (float) thp[thp_idx + 2];
 
-			const float rrs_gt_step2 = (r * rp + g * gp + b * bp) / 3.0f;
-			const float t_ref_mean	 = ref_mean[thread_idx];
-			const float rrs_center	 = t_ref_mean;
+			// const float rrs_gt_step2 = (r * rp + g * gp + b * bp) / 3.0f;
+			const float t_ref_mean = ref_mean[thread_idx];
+			const float rrs_center = t_ref_mean;
 			// const float rrs_center = (rrs_gt_step2 + t_ref_mean) / 2.0f;
 
 			// const float rrs_center = 0.0f;
@@ -264,7 +264,7 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 				printf(
 					"[%d] grad nan or inf: %g\n"
 					"rrs: %g\n"
-					//    "     loss: %g = %g + %g + %g\n"
+					"     loss: %g = %g + %g + %g\n"
 					//    "     loss(orignal): %g = %g + %g + %g\n"
 					//    "       o_l1: %g * (%g *(%g * %g))\n"
 					//    "       o_l2: %g * (%g *(%g * %g))\n"
@@ -284,7 +284,7 @@ neural_rrs_loss_rrs(const uint32_t n_elements, const uint32_t stride, const uint
 					//    (rrs_loss_scale * (pixel_err_weight * (gamma2 * var))),
 					//    (rrs_loss_scale * (gamma3 * rrs)),
 
-					//    o_l1 + o_l2 + o_l3, o_l1, o_l2, o_l3,
+					o_l1 + o_l2 + o_l3, o_l1, o_l2, o_l3,
 
 					//    rrs_loss_scale, pixel_err_weight, 1.0f, abs(e1),
 
@@ -531,7 +531,7 @@ public:
 	float *mPdf;
 	float *mError;
 	float *mSampleWeight;
-	
+
 	float *mRefMean;	// this is 1 floats for each element
 	uint32_t *mPixelID; // the pixel id for each element
 

@@ -64,11 +64,8 @@ nrrs_rrs_loss(const uint32_t n_elements, const uint32_t dims, const float loss_s
 		// now the output is rrs
 		const float var_sum = *error_sum;
 
-		const float rrs_loss_scale = 1e0;
+		const float rrs_loss_scale = 1e0f;
 		const uint32_t n_total	   = n_elements;
-
-		// const float rrs_loss_scale = 1e-3;
-		// const uint32_t n_total	   = 1;
 
 		float rrs					 = (float) predictions[prediction_idx];
 		float var					 = error[thread_idx];
@@ -77,12 +74,6 @@ nrrs_rrs_loss(const uint32_t n_elements, const uint32_t dims, const float loss_s
 
 		float dactivate_drrs = 1.0f;
 		bb_activation_and_gradient(rrs, dactivate_drrs);
-
-		// sigmoid, s(x) = 1 / (1 + exp(-x))
-		// s'(x) = s(x) * (1 - s(x))
-		// rrs					 = 1.0f / (1.0f + expf(-rrs));
-		// dactivate_drrs		 = rrs * (1.0f - rrs) * BB_SIGMOID_SCALE;
-		// rrs *= BB_SIGMOID_SCALE;
 
 		{ // k = 1
 			const uint32_t ll2_idx = thread_idx * LL2_STRIDE;
@@ -100,11 +91,12 @@ nrrs_rrs_loss(const uint32_t n_elements, const uint32_t dims, const float loss_s
 
 			const float rrs_gt_step2 = (r * rp + g * gp + b * bp) / 3.0f;
 			const float t_ref_mean	 = ref_mean[thread_idx];
-			// const float rrs_center	 = t_ref_mean;
-			const float rrs_center = (rrs_gt_step2 + t_ref_mean) / 2.0f;
 
+			// const float rrs_center = t_ref_mean;
+			// const float rrs_center = (rrs_gt_step2 + t_ref_mean) / 2.0f;
 			// const float rrs_center = 0.0f;
-			// const float rrs_center = 1.0f;
+			const float rrs_center = 1.0f;
+
 			const float net_data_pdf = data_pdf ? data_pdf[thread_idx] : 1.0f;
 
 			// loss
@@ -131,7 +123,12 @@ nrrs_rrs_loss(const uint32_t n_elements, const uint32_t dims, const float loss_s
 			// rel_inv		  = rel_inv > 0 ? 1.0f / rel_inv : 0;
 			// TODO: this may not needed as we divided by it when use it
 			// constexpr float rel_inv = 1.0f;
-			float rel_inv = 1.0f / fmax(t_ref_mean * t_ref_mean * t_ref_mean, NRRS_EPSILON);
+
+			// output is rrs
+			float rel_inv = 1.0f / fmax(t_ref_mean * t_ref_mean, NRRS_EPSILON);
+
+			// output is rrs*ref_mean
+			// float rel_inv = 1.0f / fmax(t_ref_mean * t_ref_mean * t_ref_mean, NRRS_EPSILON);
 
 			float path_var = 0.0f;
 			// {
@@ -175,78 +172,27 @@ nrrs_rrs_loss(const uint32_t n_elements, const uint32_t dims, const float loss_s
 			grad_min = loss_scale * rrs_loss_scale *
 					   (pixel_err_weight * (gamma2 * rel_inv * dvar_drrs)) * dactivate_drrs /
 					   (net_data_pdf * n_total);
-			grad_rrs = loss_scale * rrs_loss_scale * (gamma3 * 2 * (rrs - 1)) * dactivate_drrs /
-					   (net_data_pdf * n_total);
+			grad_rrs = loss_scale * rrs_loss_scale * (gamma3 * 2 * (rrs - rrs_center)) *
+					   dactivate_drrs / (net_data_pdf * n_total);
 #endif
 
 #ifdef BB_TCNN_DEBUG_MODE
 			const bool should_debug =
 				(debugPixel != -1) && (pixelID != nullptr) && (pixelID[thread_idx] == debugPixel);
 			// check nan
-			if (should_debug || isnan(grad) || isinf(grad) || isnan(rrs) || abs(grad) >= 1e2 ||
+			if (should_debug || isnan(grad) || isinf(grad) || isnan(rrs) || abs(grad) >= 1e1 ||
 				rrs < 0) {
-				// check loss
-				float o_l1 = rrs_loss_scale * (pixel_err_weight * (1.0f * abs(e1)));
-				float o_l2 = rrs_loss_scale * (pixel_err_weight * (1.0f * var));
-				float o_l3 = rrs_loss_scale * (0.0f * rrs);
+				printf("rrs [%d]: rrs = %g, grad(avg + min + rrs) = %g = %g + %g + %g\n" // 1
 
-				float dedvar_1 =
-					gamma1 * ((e1 > 0 ? 1 : -1) * (float(pixels_num - 1) / float(pixels_num)));
-				float dedvar_2 = gamma2;
+					   "var = %g, path_pdf = %g, path_var = %g, "
+					   "dvar_drrs = %g, dE_dvar = %g, rel_inv = %g, e1 = %g, var_sum = %g, "
+					   "pixel_err_weight = %g, ref_mean = %g, ex = %g, rrs_gt_step2 = %g, "
+					   "net_data_pdf = %g, loss_value = %g\n\n",
 
-				float o_grad =
-					loss_scale * rrs_loss_scale *
-					(pixel_err_weight * ((1.0f * ((e1 > 0 ? 1 : -1) *
-												  (float(pixels_num - 1) / float(pixels_num))) +
-										  1.0f) *
-										 rel_inv * dvar_drrs) +
-					 gamma3) *
-					dactivate_drrs;
+					   thread_idx, rrs, grad, grad_avg, grad_min, grad_rrs, // 1
 
-				printf(
-					"[%d] grad nan or inf: %g\n"
-					"rrs: %g\n"
-					//    "     loss: %g = %g + %g + %g\n"
-					//    "     loss(orignal): %g = %g + %g + %g\n"
-					//    "       o_l1: %g * (%g *(%g * %g))\n"
-					//    "       o_l2: %g * (%g *(%g * %g))\n"
-					//    "       o_l3: %g * (%g * %g)\n"
-					"     grad: %g\n"
-					"     grad(original): %g\n"
-					"       dE_dvar: %g, dvar_drrs: %g, pixel_err_weight: %g\n"
-					"       dE_dvar = %g + %g\n"
-					"       e1: %g, var: %g, avg_var: %g, rrs: %g, %g, %g\n"
-					//    "       path_var = max(ex2 - ex * ex, 0.0f) = max(%g - %g * %g, 0.0f)\n"
-					"       dvar_drrs = - %g * %g / max(%g, 1e-4f)\n",
-
-					thread_idx, grad, rrs,
-
-					//    values[prediction_idx],
-					//    (rrs_loss_scale * (pixel_err_weight * (gamma1 * abs(e1)))),
-					//    (rrs_loss_scale * (pixel_err_weight * (gamma2 * var))),
-					//    (rrs_loss_scale * (gamma3 * rrs)),
-
-					//    o_l1 + o_l2 + o_l3, o_l1, o_l2, o_l3,
-
-					//    rrs_loss_scale, pixel_err_weight, 1.0f, abs(e1),
-
-					//    rrs_loss_scale, pixel_err_weight, 1.0f, var,
-
-					//    rrs_loss_scale, 0.0, rrs,
-
-					grad, o_grad,
-
-					dE_dvar, dvar_drrs, pixel_err_weight,
-
-					dedvar_1, dedvar_2,
-
-					e1, var, var_sum / pixels_num, rrs, ex, ex,
-
-					// sigma, ex, ex,
-
-					path_pdf, path_var, (rrs * rrs)
-
-				);
+					   var, path_pdf, path_var, dvar_drrs, dE_dvar, rel_inv, e1, var_sum,
+					   pixel_err_weight, t_ref_mean, ex, rrs_gt_step2, net_data_pdf, loss_value);
 			}
 #endif
 		}
@@ -263,7 +209,7 @@ nrrs_rrs_loss(const uint32_t n_elements, const uint32_t dims, const float loss_s
 		// float luminance = 1.0f;
 		if (step == 1) {
 			// set all rrs = 1
-			rrs_gt = ref_mean[thread_idx];
+			// rrs_gt = ref_mean[thread_idx];
 		} else if (step == 2) {
 			// step 2: ADRRS
 			const uint32_t ll2_idx = thread_idx * LL2_STRIDE;
@@ -277,7 +223,8 @@ nrrs_rrs_loss(const uint32_t n_elements, const uint32_t dims, const float loss_s
 
 			rrs_gt = (r * rp + g * gp + b * bp) / 3.0f;
 
-			// const float refI = ref_mean[thread_idx];
+			const float refI = ref_mean[thread_idx];
+			rrs_gt			 = rrs_gt / (refI + NRRS_EPSILON);
 
 			// clamp
 			// rrs_gt = fmaxf(0.5f, fminf(20.0f, rrs_gt));
@@ -342,43 +289,22 @@ nrrs_rrs_loss(const uint32_t n_elements, const uint32_t dims, const float loss_s
 #ifdef BB_TCNN_DEBUG_MODE
 #define IDX(x) (prediction_idx + x)
 	// TODO: for visualization
-	// if (step == 3) {
-	// 	float sum = values[IDX(6)] / 7;
-	// 	for (int i = 0; i < 7; ++i) {
-	// 		values[IDX(i)] = sum;
-	// 	}
-	// }
-	if (showLossIndex != 0 && showLossIndex <= 8) {
+	if (showLossIndex >= 4 && showLossIndex <= 7) {
 		float sum = 0;
-		if (showLossIndex == 1) {
-			for (int i = 0; i < 3; ++i) {
-				sum += values[IDX(i)];
-			}
-		} else if (showLossIndex == 2) {
-			for (int i = 3; i < 6; ++i) {
-				sum += values[IDX(i)];
-			}
-		} else if (showLossIndex == 3) {
-			sum = values[IDX(0)];
-		} else if (showLossIndex == 4) {
-			for (int i = 0; i < 7; ++i) {
-				sum += (float) gradients[IDX(i)];
-			}
+		if (showLossIndex == 4) {
+			// grad all
+			sum = (float) gradients[IDX(0)];
 		} else if (showLossIndex == 5) {
-			for (int i = 0; i < 6; ++i) {
-				sum += (float) gradients[IDX(i)];
-			}
-		} else if (showLossIndex == 6) {
+			// grad avg
 			sum = grad_avg;
-		} else if (showLossIndex == 7) {
+		} else if (showLossIndex == 6) {
+			// grad min
 			sum = grad_min;
-		} else if (showLossIndex == 8) {
+		} else if (showLossIndex == 7) {
+			// grad rrs
 			sum = grad_rrs;
 		}
-		sum /= 7;
-		for (int i = 0; i < 7; ++i) {
-			values[IDX(i)] = sum;
-		}
+		values[IDX(0)] = sum;
 #undef IDX
 	}
 #endif
