@@ -26,7 +26,8 @@ nrrs_rrs_loss(const uint32_t n_elements, const uint32_t dims, const float loss_s
 #ifdef BB_TCNN_DEBUG_MODE
 			  ,
 			  const float *error_per_pixel = nullptr, const uint32_t showLossIndex = 0,
-			  const uint32_t *pixelID = nullptr, const int32_t debugPixel = -1
+			  const uint32_t *pixelID = nullptr, const int32_t debugPixel = -1,
+			  uint32_t *pixel_debug_buffer = nullptr, float pdf_lower_bound = 0.5f
 #endif
 ) {
 
@@ -50,9 +51,9 @@ nrrs_rrs_loss(const uint32_t n_elements, const uint32_t dims, const float loss_s
 	if (step == 3) {
 
 #ifdef BB_TCNN_DEBUG_MODE
+		uint32_t c_pixelId = pixelID[thread_idx];
 		{
 			float c_error			= error[thread_idx];
-			uint32_t c_pixelId		= pixelID[thread_idx];
 			float c_error_per_pixel = error_per_pixel[c_pixelId];
 
 			if (c_error != c_error_per_pixel) {
@@ -67,9 +68,18 @@ nrrs_rrs_loss(const uint32_t n_elements, const uint32_t dims, const float loss_s
 		const float rrs_loss_scale = 1e0f;
 		const uint32_t n_total	   = n_elements;
 
-		float rrs					 = (float) predictions[prediction_idx];
-		float var					 = error[thread_idx];
-		float path_pdf				 = pdf[thread_idx];
+		float rrs = (float) predictions[prediction_idx];
+
+		constexpr float sMaxRRS = 1e2f;
+#ifdef BB_TCNN_DEBUG_MODE
+		if (isinf(rrs) || rrs >= sMaxRRS) {
+			printf("rrs [%d]: rrs = %g\n", thread_idx, rrs);
+			rrs = fminf(sMaxRRS, rrs);
+		}
+#endif
+
+		const float var				 = error[thread_idx];
+		const float path_pdf		 = pdf[thread_idx];
 		const float pixel_err_weight = sample_weight[thread_idx];
 
 		float dactivate_drrs = 1.0f;
@@ -88,6 +98,8 @@ nrrs_rrs_loss(const uint32_t n_elements, const uint32_t dims, const float loss_s
 			const float rp = thp[thp_idx + 0];
 			const float gp = thp[thp_idx + 1];
 			const float bp = thp[thp_idx + 2];
+
+			// const float path_pdf = (rp + gp + bp) / 3.0f;
 
 			const float rrs_gt_step2 = (r * rp + g * gp + b * bp) / 3.0f;
 			const float t_ref_mean	 = ref_mean[thread_idx];
@@ -174,6 +186,9 @@ nrrs_rrs_loss(const uint32_t n_elements, const uint32_t dims, const float loss_s
 					   (net_data_pdf * n_total);
 			grad_rrs = loss_scale * rrs_loss_scale * (gamma3 * 2 * (rrs - rrs_center)) *
 					   dactivate_drrs / (net_data_pdf * n_total);
+			if (path_pdf > pdf_lower_bound) {
+				atomicAdd(pixel_debug_buffer + c_pixelId, 1u);
+			}
 #endif
 
 #ifdef BB_TCNN_DEBUG_MODE
@@ -326,7 +341,7 @@ public:
 		CHECK_THROW(stride == 16);
 
 		const float *thpPtr			 = mThp + mOffset * 3;			// 3 float
-		const float *pdfPtr			 = mPdf + mOffset * 3;			// 3 float
+		const float *pdfPtr			 = mPdf + mOffset * 1;			// 1 float
 		const float *errorPtr		 = mError + mOffset * 1;		// 1 float
 		const float *sampleWeightPtr = mSampleWeight + mOffset * 1; // 1 float
 		const float *refPtr			 = mRefMean + mOffset * 1;		// 1 float
@@ -342,14 +357,20 @@ public:
 
 #ifdef BB_TCNN_DEBUG_MODE
 					  ,
-					  mErrorPerPixel, mShowLossIndex, pixelIDPtr, mDebugPixel
+					  mErrorPerPixel, mShowLossIndex, pixelIDPtr, mDebugPixel, mPixelDebugBuffer,
+					  mPdfLoweBound
 #endif
 		);
 	}
 
 	void update_hyperparams(const json &params) override {
+		// frequently update offset
+		if (params.size() == 1 && params.contains("offset")) {
+			mOffset = params.value("offset", mOffset);
+			return;
+		}
+
 		mDebugPixel	   = params.value("debug_pixel_id", mDebugPixel);
-		mOffset		   = params.value("offset", mOffset);
 		mClampMax	   = params.value("clamp_max", mClampMax);
 		mClampOn	   = params.value("clamp_on", mClampOn);
 		mTrainSigma	   = params.value("train_sigma", mTrainSigma);
@@ -368,14 +389,16 @@ public:
 		mPixelID = (uint32_t *) params.value("pixel_id", (uint64_t) mPixelID);
 
 		mErrorPerPixel = (float *) params.value("error_per_pixel", (uint64_t) mErrorPerPixel);
+		mPixelDebugBuffer =
+			(uint32_t *) params.value("pixel_debug_buffer", (uint64_t) mPixelDebugBuffer);
 
 		mGamma1 = params.value("gamma1", mGamma1);
 		mGamma2 = params.value("gamma2", mGamma2);
 		mGamma3 = params.value("gamma3", mGamma3);
 
-		if (!(params.size() == 1 && params.contains("offset"))) {
-			printf("[NRRS_RRS Loss] update hyperparams: %s\n", params.dump().c_str());
-		}
+		mPdfLoweBound = params.value("pdf_lower_bound", mPdfLoweBound);
+
+		printf("[NRRS_RRS Loss] update hyperparams: %s\n", params.dump().c_str());
 	}
 
 	json hyperparams() const override {
@@ -404,11 +427,14 @@ public:
 	float *mRefMean;	// this is 1 floats for each element
 	uint32_t *mPixelID; // the pixel id for each element
 
-	float *mErrorPerPixel; // the error per pixel [Debug]
+	float *mErrorPerPixel;		 // the error per pixel [Debug]
+	uint32_t *mPixelDebugBuffer; // [Debug]
 
 	float mGamma1{1.0f};
 	float mGamma2{1.0f};
 	float mGamma3{1.0f};
+
+	float mPdfLoweBound{0.01f};
 
 	float *mLossSumErrorGPUPtr; // the GPU address of the sum of error
 };

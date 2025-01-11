@@ -459,7 +459,7 @@ public:
 		);
 
 		const float *thpPtr			 = mThp + mOffset * 3;			// 3 float
-		const float *pdfPtr			 = mPdf + mOffset * 3;			// 3 float
+		const float *pdfPtr			 = mPdf + mOffset * 1;			// 1 float
 		const float *errorPtr		 = mError + mOffset * 1;		// 1 float
 		const float *sampleWeightPtr = mSampleWeight + mOffset * 1; // 1 float
 		const float *refPtr			 = mRefMean + mOffset * 1;		// 1 float
