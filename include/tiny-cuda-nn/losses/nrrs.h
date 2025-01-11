@@ -23,3 +23,14 @@ __device__ inline void bb_activation_and_gradient(float &x, float &dx) {
 	x					= x_is_neg ? (logf(x_exp + 1.0f)) : (0.5f * x + ln2);
 	dx					= x_is_neg ? (x_exp / (1.0f + x_exp)) : 0.5f;
 }
+
+// [TODO] it is just for debug, no use in real application
+// https://forums.developer.nvidia.com/t/implementation-of-atomicmax-for-float/220388
+__device__ __forceinline__ float atomicMax(float *address, float val) {
+	int ret = __float_as_int(*address);
+	while (val > __int_as_float(ret)) {
+		int old = ret;
+		if ((ret = atomicCAS((int *) address, old, __float_as_int(val))) == old) break;
+	}
+	return __int_as_float(ret);
+}

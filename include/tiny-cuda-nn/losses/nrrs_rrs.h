@@ -11,23 +11,33 @@ namespace tcnn {
 
 #define LL2_STRIDE 6
 
+__global__ void prinf_grad(const uint32_t n_elements, float *grad, const uint32_t offset,
+						   const uint32_t step) {
+	const uint32_t thread_idx = threadIdx.x + blockIdx.x * blockDim.x;
+	if (thread_idx >= n_elements) return;
+
+	if (offset == 0 && step == 3) {
+		printf("max abs(grad): %g\n", grad[0]);
+		grad[0] = 0.0f;
+	}
+}
+
 template <typename T>
-__global__ void
-nrrs_rrs_loss(const uint32_t n_elements, const uint32_t dims, const float loss_scale,
-			  const uint32_t step, const float *__restrict__ thp, const float *__restrict__ pdf,
-			  const float *__restrict__ error, const float *__restrict__ ref_mean,
-			  const float *__restrict__ error_sum, const float *__restrict__ sample_weight,
-			  const __half *__restrict__ ll2, const uint32_t pixels_num,
-			  const T *__restrict__ predictions, const float *__restrict__ targets,
-			  float *__restrict__ values, T *__restrict__ gradients,
-			  const float *__restrict__ data_pdf = nullptr, const bool clampOn = false,
-			  const float clampMax = 10.0f, const bool trainSigma = true, const float gamma1 = 1.0f,
-			  const float gamma2 = 1.0f, const float gamma3 = 1.0f
+__global__ void nrrs_rrs_loss(
+	const uint32_t n_elements, const uint32_t dims, const float loss_scale, const uint32_t step,
+	const float *__restrict__ thp, const float *__restrict__ pdf, const float *__restrict__ error,
+	const float *__restrict__ ref_mean, const float *__restrict__ error_sum,
+	const float *__restrict__ sample_weight, const __half *__restrict__ ll2,
+	const uint32_t pixels_num, const T *__restrict__ predictions, const float *__restrict__ targets,
+	float *__restrict__ values, T *__restrict__ gradients,
+	const float *__restrict__ data_pdf = nullptr, const bool clampOn = false,
+	const float clampMax = 10.0f, const bool trainSigma = true, const float gamma1 = 1.0f,
+	const float gamma2 = 1.0f, const float gamma3 = 1.0f
 #ifdef BB_TCNN_DEBUG_MODE
-			  ,
-			  const float *error_per_pixel = nullptr, const uint32_t showLossIndex = 0,
-			  const uint32_t *pixelID = nullptr, const int32_t debugPixel = -1,
-			  uint32_t *pixel_debug_buffer = nullptr, float pdf_lower_bound = 0.5f
+	,
+	const float *error_per_pixel = nullptr, const uint32_t showLossIndex = 0,
+	const uint32_t *pixelID = nullptr, const int32_t debugPixel = -1,
+	uint32_t *pixel_debug_buffer = nullptr, float pdf_lower_bound = 0.5f, float *grad_max = nullptr
 #endif
 ) {
 
@@ -70,16 +80,17 @@ nrrs_rrs_loss(const uint32_t n_elements, const uint32_t dims, const float loss_s
 
 		float rrs = (float) predictions[prediction_idx];
 
-		constexpr float sMaxRRS = 1e2f;
 #ifdef BB_TCNN_DEBUG_MODE
-		if (isinf(rrs) || rrs >= sMaxRRS) {
-			printf("rrs [%d]: rrs = %g\n", thread_idx, rrs);
-			rrs = fminf(sMaxRRS, rrs);
-		}
+		// constexpr float sMaxRRS = 1e2f;
+		// if (isinf(rrs) || rrs >= sMaxRRS) {
+		// 	printf("rrs [%d]: rrs = %g\n", thread_idx, rrs);
+		// 	rrs = fminf(sMaxRRS, rrs);
+		// }
 #endif
 
-		const float var				 = error[thread_idx];
-		const float path_pdf		 = pdf[thread_idx];
+		const float var		 = error[thread_idx];
+		const float path_pdf = fminf(pdf[thread_idx], 1.0f);
+		// const float path_pdf		 = pdf[thread_idx];
 		const float pixel_err_weight = sample_weight[thread_idx];
 
 		float dactivate_drrs = 1.0f;
@@ -112,18 +123,33 @@ nrrs_rrs_loss(const uint32_t n_elements, const uint32_t dims, const float loss_s
 			const float net_data_pdf = data_pdf ? data_pdf[thread_idx] : 1.0f;
 
 			// loss
-			float e1 = var - var_sum / pixels_num;
+			const float e1 = var - var_sum / pixels_num;
 
+#define BB_L1_L2_k 1
+
+#if BB_L1_L2_k == 1
 			float loss_value =
 				rrs_loss_scale * (pixel_err_weight * (gamma1 * abs(e1) + gamma2 * var) +
 								  (gamma3 * (rrs - rrs_center) * (rrs - rrs_center)));
+#elif BB_L1_L2_k == 2
+			float loss_value =
+				rrs_loss_scale * (pixel_err_weight * (gamma1 * e1 * e1 + gamma2 * var * var) +
+								  (gamma3 * (rrs - rrs_center) * (rrs - rrs_center)));
+#endif
+
 			loss_value /= net_data_pdf * n_total;
 
 			values[prediction_idx] = loss_value;
 
 			// gradient
+
+#if BB_L1_L2_k == 1
 			float dE_dvar =
 				gamma1 * ((e1 > 0 ? 1 : -1) * (float(pixels_num - 1) / float(pixels_num))) + gamma2;
+#elif BB_L1_L2_k == 2
+			float dE_dvar =
+				gamma1 * (2 * e1 * (float(pixels_num - 1) / float(pixels_num))) + gamma2 * 2 * var;
+#endif
 
 			// dE_dvar /= (var + 1); // var = log(var + 1)
 
@@ -172,9 +198,13 @@ nrrs_rrs_loss(const uint32_t n_elements, const uint32_t dims, const float loss_s
 			// grad = fmaxf(-1e1f, fminf(1e1f, grad));
 			grad /= net_data_pdf * n_total;
 
+			// grad = fminf(1e-2f, fmax(grad, -1e-2f));
+
 			gradients[prediction_idx] = (T) (grad);
 
 #ifdef BB_TCNN_DEBUG_MODE
+			// atomicMax(grad_max, abs(grad));
+
 			grad_avg =
 				loss_scale * rrs_loss_scale *
 				(pixel_err_weight *
@@ -202,12 +232,13 @@ nrrs_rrs_loss(const uint32_t n_elements, const uint32_t dims, const float loss_s
 					   "var = %g, path_pdf = %g, path_var = %g, "
 					   "dvar_drrs = %g, dE_dvar = %g, rel_inv = %g, e1 = %g, var_sum = %g, "
 					   "pixel_err_weight = %g, ref_mean = %g, ex = %g, rrs_gt_step2 = %g, "
-					   "net_data_pdf = %g, loss_value = %g\n\n",
+					   "net_data_pdf = %g, loss_value = %g, pixelId: %d\n\n",
 
 					   thread_idx, rrs, grad, grad_avg, grad_min, grad_rrs, // 1
 
 					   var, path_pdf, path_var, dvar_drrs, dE_dvar, rel_inv, e1, var_sum,
-					   pixel_err_weight, t_ref_mean, ex, rrs_gt_step2, net_data_pdf, loss_value);
+					   pixel_err_weight, t_ref_mean, ex, rrs_gt_step2, net_data_pdf, loss_value,
+					   c_pixelId);
 			}
 #endif
 		}
@@ -349,6 +380,13 @@ public:
 
 		const __half *ll2Ptr = mLL2; // update each training batch
 
+#ifdef BB_TCNN_DEBUG_MODE
+		// if (mDebugPixel != -1) {
+		// 	printf("debug pixel: %d, offset: %d\n", mDebugPixel, mOffset);
+		// }
+		// linear_kernel(prinf_grad, 0, stream, 1, mGradMax, mOffset, mStep);
+#endif
+
 		linear_kernel(nrrs_rrs_loss<T>, 0, stream, prediction.n_elements() / stride, dims,
 					  loss_scale, mStep, thpPtr, pdfPtr, errorPtr, refPtr, mLossSumErrorGPUPtr,
 					  sampleWeightPtr, ll2Ptr, mPixels, prediction.data(), target.data(),
@@ -358,7 +396,7 @@ public:
 #ifdef BB_TCNN_DEBUG_MODE
 					  ,
 					  mErrorPerPixel, mShowLossIndex, pixelIDPtr, mDebugPixel, mPixelDebugBuffer,
-					  mPdfLoweBound
+					  mPdfLoweBound, mGradMax
 #endif
 		);
 	}
@@ -399,6 +437,10 @@ public:
 		mPdfLoweBound = params.value("pdf_lower_bound", mPdfLoweBound);
 
 		printf("[NRRS_RRS Loss] update hyperparams: %s\n", params.dump().c_str());
+
+		if (mGradMax == nullptr) {
+			cudaMalloc(&mGradMax, sizeof(float));
+		}
 	}
 
 	json hyperparams() const override {
@@ -408,6 +450,15 @@ public:
 			// {"show_loss_index", mShowLossIndex},
 		};
 	}
+
+	virtual ~NRRSRRSLoss() {
+		if (mGradMax) {
+			cudaFree(mGradMax);
+			mGradMax = nullptr;
+		}
+	}
+
+	float *mGradMax{nullptr};
 
 	bool mClampOn{false};
 	float mClampMax{500.0f};
