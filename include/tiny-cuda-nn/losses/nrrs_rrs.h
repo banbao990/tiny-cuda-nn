@@ -32,7 +32,8 @@ __global__ void nrrs_rrs_loss(
 	float *__restrict__ values, T *__restrict__ gradients,
 	const float *__restrict__ data_pdf = nullptr, const bool clampOn = false,
 	const float clampMax = 10.0f, const bool trainSigma = true, const float gamma1 = 1.0f,
-	const float gamma2 = 1.0f, const float gamma3 = 1.0f
+	const float gamma2 = 1.0f, const float gamma3 = 1.0f,
+	const bool pixelErrorMultiplySamples = false, const float *numberSamples = nullptr
 #ifdef BB_TCNN_DEBUG_MODE
 	,
 	const float *error_per_pixel = nullptr, const uint32_t showLossIndex = 0,
@@ -125,19 +126,19 @@ __global__ void nrrs_rrs_loss(
 			// loss
 			const float e1 = var - var_sum / pixels_num;
 
-#define BB_L1_L2_k 1
+			float loss_value_3 = gamma3 * (rrs - rrs_center) * (rrs - rrs_center);
+
+#define BB_L1_L2_k 2
 
 #if BB_L1_L2_k == 1
-			float loss_value =
-				rrs_loss_scale * (pixel_err_weight * (gamma1 * abs(e1) + gamma2 * var) +
-								  (gamma3 * (rrs - rrs_center) * (rrs - rrs_center)));
+			float loss_value_12 = gamma1 * abs(e1) + gamma2 * var;
 #elif BB_L1_L2_k == 2
-			float loss_value =
-				rrs_loss_scale * (pixel_err_weight * (gamma1 * e1 * e1 + gamma2 * var * var) +
-								  (gamma3 * (rrs - rrs_center) * (rrs - rrs_center)));
+			float loss_value_12 = gamma1 * e1 * e1 + gamma2 * var * var;
 #endif
 
-			loss_value /= net_data_pdf * n_total;
+			const float loss_value = rrs_loss_scale *
+									 (pixel_err_weight * loss_value_12 + loss_value_3) /
+									 net_data_pdf / n_total;
 
 			values[prediction_idx] = loss_value;
 
@@ -189,8 +190,18 @@ __global__ void nrrs_rrs_loss(
 				path_var		 = max(out2 - ex_ex, 0.0f);
 			}
 			// }
-			const float dvar_drrs = -path_pdf * path_var / max(rrs * rrs, NRRS_EPSILON);
-			float grad			  = loss_scale * rrs_loss_scale *
+
+			float dvar_drrs = -path_pdf * path_var / max(rrs * rrs, NRRS_EPSILON);
+			if (pixelErrorMultiplySamples) {
+				float num_samples = numberSamples[thread_idx];
+				printf("check all code call atomicAdd(mPixelState->mNumSamples, ...), %g\n",
+					   num_samples);
+				dvar_drrs = dvar_drrs * num_samples + e1 / num_samples;
+			} else {
+				// the same
+			}
+
+			float grad = loss_scale * rrs_loss_scale *
 						 (pixel_err_weight * (dE_dvar * rel_inv * dvar_drrs) +
 						  gamma3 * 2 * (rrs - rrs_center)) *
 						 dactivate_drrs;
@@ -371,12 +382,13 @@ public:
 
 		CHECK_THROW(stride == 16);
 
-		const float *thpPtr			 = mThp + mOffset * 3;			// 3 float
-		const float *pdfPtr			 = mPdf + mOffset * 1;			// 1 float
-		const float *errorPtr		 = mError + mOffset * 1;		// 1 float
-		const float *sampleWeightPtr = mSampleWeight + mOffset * 1; // 1 float
-		const float *refPtr			 = mRefMean + mOffset * 1;		// 1 float
-		const uint32_t *pixelIDPtr	 = mPixelID + mOffset * 1;		// 1 uint32_t
+		const float *thpPtr				   = mThp + mOffset * 3;		   // 3 float
+		const float *pdfPtr				   = mPdf + mOffset * 1;		   // 1 float
+		const float *errorPtr			   = mError + mOffset * 1;		   // 1 float
+		const float *sampleWeightPtr	   = mSampleWeight + mOffset * 1;  // 1 float
+		const float *refPtr				   = mRefMean + mOffset * 1;	   // 1 float
+		const uint32_t *pixelIDPtr		   = mPixelID + mOffset * 1;	   // 1 uint32_t
+		const float *numberSamplesPerPixel = mNumberSamples + mOffset * 1; // 1 float
 
 		const __half *ll2Ptr = mLL2; // update each training batch
 
@@ -391,7 +403,8 @@ public:
 					  loss_scale, mStep, thpPtr, pdfPtr, errorPtr, refPtr, mLossSumErrorGPUPtr,
 					  sampleWeightPtr, ll2Ptr, mPixels, prediction.data(), target.data(),
 					  values.data(), gradients.data(), data_pdf ? data_pdf->data() : nullptr,
-					  mClampOn, mClampMax, mTrainSigma, mGamma1, mGamma2, mGamma3
+					  mClampOn, mClampMax, mTrainSigma, mGamma1, mGamma2, mGamma3,
+					  mPixelErrorMultiplySamples, numberSamplesPerPixel
 
 #ifdef BB_TCNN_DEBUG_MODE
 					  ,
@@ -436,6 +449,10 @@ public:
 
 		mPdfLoweBound = params.value("pdf_lower_bound", mPdfLoweBound);
 
+		mPixelErrorMultiplySamples =
+			params.value("pixel_error_multiply_samples", mPixelErrorMultiplySamples);
+		mNumberSamples = (float *) params.value("number_samples", (uint64_t) mNumberSamples);
+
 		printf("[NRRS_RRS Loss] update hyperparams: %s\n", params.dump().c_str());
 
 		if (mGradMax == nullptr) {
@@ -477,6 +494,7 @@ public:
 	__half *mLL2;		// the l,l2 for each element
 	float *mRefMean;	// this is 1 floats for each element
 	uint32_t *mPixelID; // the pixel id for each element
+	float *mNumberSamples;
 
 	float *mErrorPerPixel;		 // the error per pixel [Debug]
 	uint32_t *mPixelDebugBuffer; // [Debug]
@@ -486,6 +504,7 @@ public:
 	float mGamma3{1.0f};
 
 	float mPdfLoweBound{0.01f};
+	bool mPixelErrorMultiplySamples{false};
 
 	float *mLossSumErrorGPUPtr; // the GPU address of the sum of error
 };
