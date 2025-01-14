@@ -185,9 +185,15 @@ __global__ void nrrs_rrs_loss(
 				path_var	= sigma * sigma + ex_ex;
 				path_var	= max(path_var, 0.0f);
 			} else {
-				const float out2 = (r2 + g2 + b2) / 3.0f;
-				float ex_ex		 = (rrs >= 1.0f) ? ex * ex : 0.0f;
-				path_var		 = max(out2 - ex_ex, 0.0f);
+				// ### output is var(sigma^2)
+				const float sigma2 = (r2 + g2 + b2) / 3.0f;
+				float ex_ex		   = (rrs >= 1.0f) ? 0.0f : ex * ex;
+				path_var		   = max(sigma2 + ex_ex, 0.0f);
+
+				// ### output is E[x^2]
+				// const float out2 = (r2 + g2 + b2) / 3.0f;
+				// float ex_ex		 = (rrs >= 1.0f) ? ex * ex : 0.0f;
+				// path_var		 = max(out2 - ex_ex, 0.0f);
 			}
 			// }
 
@@ -216,6 +222,7 @@ __global__ void nrrs_rrs_loss(
 #ifdef BB_TCNN_DEBUG_MODE
 			// atomicMax(grad_max, abs(grad));
 
+#if BB_L1_L2_k == 1
 			grad_avg =
 				loss_scale * rrs_loss_scale *
 				(pixel_err_weight *
@@ -225,6 +232,17 @@ __global__ void nrrs_rrs_loss(
 			grad_min = loss_scale * rrs_loss_scale *
 					   (pixel_err_weight * (gamma2 * rel_inv * dvar_drrs)) * dactivate_drrs /
 					   (net_data_pdf * n_total);
+#elif BB_L1_L2_k == 2
+			grad_avg =
+				loss_scale * rrs_loss_scale *
+				(pixel_err_weight * (gamma1 * 2 * e1 * (float(pixels_num - 1) / float(pixels_num)) *
+									 rel_inv * dvar_drrs)) *
+				dactivate_drrs / (net_data_pdf * n_total);
+			grad_min = loss_scale * rrs_loss_scale *
+					   (pixel_err_weight * (gamma2 * 2 * var * rel_inv * dvar_drrs)) *
+					   dactivate_drrs / (net_data_pdf * n_total);
+#endif
+
 			grad_rrs = loss_scale * rrs_loss_scale * (gamma3 * 2 * (rrs - rrs_center)) *
 					   dactivate_drrs / (net_data_pdf * n_total);
 			if (path_pdf > pdf_lower_bound) {

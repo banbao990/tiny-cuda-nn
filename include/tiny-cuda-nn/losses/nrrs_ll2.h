@@ -97,27 +97,45 @@ __global__ void nrrs_ll2_loss(const uint32_t n_elements, const uint32_t stride,
 		grad_sigma					   = grad_sigma * dsigma_dsigma_raw / pdf / n_total;
 		gradients[i + BB_SIGMA_OFFSET] = (T) (loss_scale * grad_sigma);
 	} else {
-		// #####[X2]
-		float scale_x2 = 0.01f;
-		const float x2 = (float) predictions[i + BB_L2_OFFSET];
-		// const float target_x2 = (float) targets[target_idx + BB_L2_OFFSET];
-		const float target_x2		   = target * target;
-		const float x2_sq_plus_epsilon = x2 * x2 + NRRS_EPSILON;
-		const float diff_x2			   = x2 - target_x2;
+		// // #####[X2]
+		// float scale_x2 = 0.01f;
+		// const float x2 = (float) predictions[i + BB_L2_OFFSET];
+		// // const float target_x2 = (float) targets[target_idx + BB_L2_OFFSET];
+		// const float target_x2		   = target * target;
+		// const float x2_sq_plus_epsilon = x2 * x2 + NRRS_EPSILON;
+		// const float diff_x2			   = x2 - target_x2;
 
-		float loss_x2 = scale_x2 * diff_x2 * diff_x2 / x2_sq_plus_epsilon / pdf / n_total;
+		// float loss_x2 = scale_x2 * diff_x2 * diff_x2 / x2_sq_plus_epsilon / pdf / n_total;
+		// if (clampOn) {
+		// 	const float scale1 = loss_x2 > clampMax ? clampMax / loss_x2 : 1.0f;
+		// 	loss_x2 *= scale1;
+		// 	scale_x2 *= scale1;
+		// }
+
+		// // if nan, set to 0
+		// bool loss_x2_is_nan			= isnan(loss_x2);
+		// values[i + BB_L2_OFFSET]	= loss_x2_is_nan ? 0 : loss_x2;
+		// float gradient_x2			= 2 * diff_x2 / x2_sq_plus_epsilon / pdf;
+		// gradient_x2					= scale_x2 * loss_scale * gradient_x2 / n_total;
+		// gradients[i + BB_L2_OFFSET] = (T) (loss_x2_is_nan ? 0 : gradient_x2);
+
+		// ##### Variance = E[(x - E[x])^2]
+		// loss = || pre - diff2 ||^2 / pre^2
+		const float prediction_x2	 = (float) predictions[i + BB_L2_OFFSET];
+		const float diff_x2			 = prediction_x2 - diff2;
+		const float diff_x2_2		 = diff_x2 * diff_x2;
+		const float prediction_x2_sq = prediction_x2 * prediction_x2 + NRRS_EPSILON;
+
+		float loss_x2  = diff_x2_2 / prediction_x2_sq / pdf / n_total;
+		float scale_x2 = 1.0f;
 		if (clampOn) {
-			const float scale1 = loss_x2 > clampMax ? clampMax / loss_x2 : 1.0f;
-			loss_x2 *= scale1;
-			scale_x2 *= scale1;
+			scale_x2 = loss_x2 > clampMax ? clampMax / loss_x2 : 1.0f;
 		}
 
-		// if nan, set to 0
-		bool loss_x2_is_nan			= isnan(loss_x2);
-		values[i + BB_L2_OFFSET]	= loss_x2_is_nan ? 0 : loss_x2;
-		float gradient_x2			= 2 * diff_x2 / x2_sq_plus_epsilon / pdf;
-		gradient_x2					= scale_x2 * loss_scale * gradient_x2 / n_total;
-		gradients[i + BB_L2_OFFSET] = (T) (loss_x2_is_nan ? 0 : gradient_x2);
+		values[i + BB_L2_OFFSET]	= scale_x2 * loss_x2;
+		float grad_x2				= scale_x2 * 2 * diff_x2 / prediction_x2_sq;
+		grad_x2						= grad_x2 / pdf / n_total;
+		gradients[i + BB_L2_OFFSET] = (T) (loss_scale * grad_x2);
 
 		// check nan
 		// if (isnan(loss_x2) || isinf(loss_x2) || isnan(gradient_x2) || isinf(gradient_x2)) {
