@@ -112,6 +112,7 @@ __global__ void nrrs_rrs_loss(
 			const float bp = thp[thp_idx + 2];
 
 			// const float path_pdf = (rp + gp + bp) / 3.0f;
+			const float g_div_p = (rp + gp + bp) / 3;
 
 			const float rrs_gt_step2 = (r * rp + g * gp + b * bp) / 3.0f;
 			const float t_ref_mean	 = ref_mean[thread_idx];
@@ -151,6 +152,7 @@ __global__ void nrrs_rrs_loss(
 			float dE_dvar =
 				gamma1 * (2 * e1 * (float(pixels_num - 1) / float(pixels_num))) + gamma2 * 2 * var;
 #endif
+			dE_dvar *= g_div_p * g_div_p;
 
 			// dE_dvar /= (var + 1); // var = log(var + 1)
 
