@@ -89,9 +89,10 @@ __global__ void nrrs_rrs_loss(
 		// }
 #endif
 
-		const float var		 = error[thread_idx];
-		const float path_pdf = fminf(pdf[thread_idx], 1.0f);
+		const float var = error[thread_idx];
+		// const float path_pdf = fminf(log(pdf[thread_idx] + 1.0f), 10.0f);
 		// const float path_pdf		 = pdf[thread_idx];
+		const float path_pdf		 = 1.0f;
 		const float pixel_err_weight = sample_weight[thread_idx];
 
 		float dactivate_drrs = 1.0f;
