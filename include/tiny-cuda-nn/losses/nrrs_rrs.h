@@ -130,6 +130,15 @@ __global__ void nrrs_rrs_loss(
 
 			float loss_value_3 = gamma3 * (rrs - rrs_center) * (rrs - rrs_center);
 
+			const float gamma4					= 0.5f;
+			const float rrs_after_normalization = targets[thread_idx];
+			// if (thread_idx % 400000 == 0) {
+			// 	printf("[%d] rrs = %g, rrs(normalized) = %g\n", thread_idx, rrs,
+			// 		   rrs_after_normalization);
+			// }
+			float loss_value_4 =
+				gamma4 * (rrs - rrs_after_normalization) * (rrs - rrs_after_normalization);
+
 #define BB_L1_L2_k 2
 
 #if BB_L1_L2_k == 1
@@ -138,9 +147,9 @@ __global__ void nrrs_rrs_loss(
 			float loss_value_12 = gamma1 * e1 * e1 + gamma2 * var * var;
 #endif
 
-			const float loss_value = rrs_loss_scale *
-									 (pixel_err_weight * loss_value_12 + loss_value_3) /
-									 net_data_pdf / n_total;
+			const float loss_value =
+				rrs_loss_scale * (pixel_err_weight * loss_value_12 + loss_value_3 + loss_value_4) /
+				net_data_pdf / n_total;
 
 			values[prediction_idx] = loss_value;
 
@@ -153,6 +162,17 @@ __global__ void nrrs_rrs_loss(
 			float dE_dvar =
 				gamma1 * (2 * e1 * (float(pixels_num - 1) / float(pixels_num))) + gamma2 * 2 * var;
 #endif
+
+			if (pixelErrorMultiplySamples) {
+				float num_samples = numberSamples[thread_idx];
+				// printf("check all code call atomicAdd(mPixelState->mNumSamples, ...), %g\n",
+				//    num_samples);
+				dE_dvar *= num_samples * 0.1f;
+			} else {
+				// the same
+			}
+
+			// throughput^2
 			dE_dvar *= g_div_p * g_div_p;
 
 			// dE_dvar /= (var + 1); // var = log(var + 1)
@@ -201,19 +221,12 @@ __global__ void nrrs_rrs_loss(
 			// }
 
 			float dvar_drrs = -path_pdf * path_var / max(rrs * rrs, NRRS_EPSILON);
-			if (pixelErrorMultiplySamples) {
-				float num_samples = numberSamples[thread_idx];
-				printf("check all code call atomicAdd(mPixelState->mNumSamples, ...), %g\n",
-					   num_samples);
-				dvar_drrs = dvar_drrs * num_samples + e1 / num_samples;
-			} else {
-				// the same
-			}
 
-			float grad = loss_scale * rrs_loss_scale *
-						 (pixel_err_weight * (dE_dvar * rel_inv * dvar_drrs) +
-						  gamma3 * 2 * (rrs - rrs_center)) *
-						 dactivate_drrs;
+			float grad =
+				loss_scale * rrs_loss_scale *
+				(pixel_err_weight * (dE_dvar * rel_inv * dvar_drrs) +
+				 gamma3 * 2 * (rrs - rrs_center) + gamma4 * 2 * (rrs - rrs_after_normalization)) *
+				dactivate_drrs;
 
 			// grad = fmaxf(-1e1f, fminf(1e1f, grad));
 			grad /= net_data_pdf * n_total;
@@ -248,7 +261,7 @@ __global__ void nrrs_rrs_loss(
 
 			grad_rrs = loss_scale * rrs_loss_scale * (gamma3 * 2 * (rrs - rrs_center)) *
 					   dactivate_drrs / (net_data_pdf * n_total);
-			if (path_pdf > pdf_lower_bound) {
+			if (abs(grad_min) * n_total > pdf_lower_bound) {
 				atomicAdd(pixel_debug_buffer + c_pixelId, 1u);
 			}
 #endif
