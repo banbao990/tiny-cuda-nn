@@ -32,7 +32,7 @@ __global__ void nrrs_rrs_loss(
 	float *__restrict__ values, T *__restrict__ gradients,
 	const float *__restrict__ data_pdf = nullptr, const bool clampOn = false,
 	const float clampMax = 10.0f, const bool trainSigma = true, const float gamma1 = 1.0f,
-	const float gamma2 = 1.0f, const float gamma3 = 1.0f,
+	const float gamma2 = 1.0f, const float gamma3 = 1.0f, const float gamma4 = 1.0f,
 	const bool pixelErrorMultiplySamples = false, const float *numberSamples = nullptr
 #ifdef BB_TCNN_DEBUG_MODE
 	,
@@ -130,7 +130,6 @@ __global__ void nrrs_rrs_loss(
 
 			float loss_value_3 = gamma3 * (rrs - rrs_center) * (rrs - rrs_center);
 
-			const float gamma4					= 0.5f;
 			const float rrs_after_normalization = targets[thread_idx];
 			// if (thread_idx % 400000 == 0) {
 			// 	printf("[%d] rrs = %g, rrs(normalized) = %g\n", thread_idx, rrs,
@@ -238,29 +237,34 @@ __global__ void nrrs_rrs_loss(
 #ifdef BB_TCNN_DEBUG_MODE
 			// atomicMax(grad_max, abs(grad));
 
+			const float grad_coeff =
+				loss_scale * rrs_loss_scale * dactivate_drrs / (net_data_pdf * n_total);
+
+			float grad_coeff_avgmin =
+				grad_coeff * pixel_err_weight * rel_inv * dvar_drrs * (g_div_p * g_div_p);
+
+			if (pixelErrorMultiplySamples) {
+				float num_samples = numberSamples[thread_idx];
+				// printf("check all code call atomicAdd(mPixelState->mNumSamples, ...), %g\n",
+				//    num_samples);
+				grad_coeff_avgmin *= num_samples * 0.1f;
+			}
+
 #if BB_L1_L2_k == 1
-			grad_avg =
-				loss_scale * rrs_loss_scale *
-				(pixel_err_weight *
-				 ((gamma1 * ((e1 > 0 ? 1 : -1) * (float(pixels_num - 1) / float(pixels_num)))) *
-				  rel_inv * dvar_drrs)) *
-				dactivate_drrs / (net_data_pdf * n_total);
-			grad_min = loss_scale * rrs_loss_scale *
-					   (pixel_err_weight * (gamma2 * rel_inv * dvar_drrs)) * dactivate_drrs /
-					   (net_data_pdf * n_total);
+			grad_avg = grad_coeff_avgmin *
+					   (gamma1 * ((e1 > 0 ? 1 : -1) * (float(pixels_num - 1) / float(pixels_num))));
+			grad_min = grad_coeff_avgmin * (gamma2);
+
 #elif BB_L1_L2_k == 2
 			grad_avg =
-				loss_scale * rrs_loss_scale *
-				(pixel_err_weight * (gamma1 * 2 * e1 * (float(pixels_num - 1) / float(pixels_num)) *
-									 rel_inv * dvar_drrs)) *
-				dactivate_drrs / (net_data_pdf * n_total);
-			grad_min = loss_scale * rrs_loss_scale *
-					   (pixel_err_weight * (gamma2 * 2 * var * rel_inv * dvar_drrs)) *
-					   dactivate_drrs / (net_data_pdf * n_total);
+				grad_coeff_avgmin * (gamma1 * 2 * e1 * (float(pixels_num - 1) / float(pixels_num)));
+
+			grad_min = grad_coeff_avgmin * (gamma2 * 2 * var);
 #endif
 
-			grad_rrs = loss_scale * rrs_loss_scale * (gamma3 * 2 * (rrs - rrs_center)) *
-					   dactivate_drrs / (net_data_pdf * n_total);
+			grad_rrs = grad_coeff * (gamma3 * 2 * (rrs - rrs_center) +
+									 gamma4 * 2 * (rrs - rrs_after_normalization));
+
 			if (abs(grad_min) * n_total > pdf_lower_bound) {
 				atomicAdd(pixel_debug_buffer + c_pixelId, 1u);
 			}
@@ -339,12 +343,12 @@ __global__ void nrrs_rrs_loss(
 		const float difference = rrs_loss_scale * dactivate_drrs * (prediction - rrs_gt);
 
 		const uint32_t n_total = n_elements; // /stride; // why error?
-		const float pdf		   = data_pdf ? data_pdf[target_idx] : 1;
+		const float sample_pdf = data_pdf ? data_pdf[target_idx] : 1;
 
 		// const float prediction_sq_plus_epsilon = luminance * luminance + NRRS_EPSILON;
 		const float prediction_sq_plus_epsilon = prediction * prediction + NRRS_EPSILON;
 
-		float v = difference * difference / prediction_sq_plus_epsilon / pdf / n_total;
+		float v = difference * difference / prediction_sq_plus_epsilon / sample_pdf / n_total;
 
 		float scale = 1.0f;
 		if (clampOn) {
@@ -352,7 +356,7 @@ __global__ void nrrs_rrs_loss(
 		}
 		values[prediction_idx] = BB_RRS_LOSS_SCALE_STEP2 * scale * v;
 
-		float gradient = 2 * difference / prediction_sq_plus_epsilon / pdf;
+		float gradient = 2 * difference / prediction_sq_plus_epsilon / sample_pdf;
 		// sigmoid
 		// gradient *= prediction * (1.0f - prediction);
 		// softplus
@@ -437,7 +441,7 @@ public:
 					  loss_scale, mStep, thpPtr, pdfPtr, errorPtr, refPtr, mLossSumErrorGPUPtr,
 					  sampleWeightPtr, ll2Ptr, mPixels, prediction.data(), target.data(),
 					  values.data(), gradients.data(), data_pdf ? data_pdf->data() : nullptr,
-					  mClampOn, mClampMax, mTrainSigma, mGamma1, mGamma2, mGamma3,
+					  mClampOn, mClampMax, mTrainSigma, mGamma1, mGamma2, mGamma3, mGamma4,
 					  mPixelErrorMultiplySamples, numberSamplesPerPixel
 
 #ifdef BB_TCNN_DEBUG_MODE
@@ -480,6 +484,7 @@ public:
 		mGamma1 = params.value("gamma1", mGamma1);
 		mGamma2 = params.value("gamma2", mGamma2);
 		mGamma3 = params.value("gamma3", mGamma3);
+		mGamma4 = params.value("gamma4", mGamma4);
 
 		mPdfLoweBound = params.value("pdf_lower_bound", mPdfLoweBound);
 
@@ -536,6 +541,7 @@ public:
 	float mGamma1{1.0f};
 	float mGamma2{1.0f};
 	float mGamma3{1.0f};
+	float mGamma4{1.0f};
 
 	float mPdfLoweBound{0.01f};
 	bool mPixelErrorMultiplySamples{false};

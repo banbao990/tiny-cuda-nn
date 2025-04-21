@@ -126,6 +126,16 @@ __global__ void nrrs_ll2_loss(const uint32_t n_elements, const uint32_t stride,
 		const float diff_x2_2		 = diff_x2 * diff_x2;
 		const float prediction_x2_sq = prediction_x2 * prediction_x2 + NRRS_EPSILON;
 
+#ifdef BB_TCNN_DEBUG_MODE
+		if ((isinf(diff2) || isnan(diff2) || isnan(prediction_sq_plus_epsilon)) ||
+			(isinf(diff_x2_2) || isnan(diff_x2_2) || isnan(prediction_x2_sq))) {
+			printf("[%d]: [L] prediction = %g, target = %g, diff = %g, "
+				   "[Var] prediction_x2 = %g, target = %g, diff_x2 = %g\n",
+
+				   i, mean, target, diff, prediction_x2, diff2, diff_x2);
+		}
+#endif
+
 		float loss_x2  = diff_x2_2 / prediction_x2_sq / pdf / n_total;
 		float scale_x2 = 1.0f;
 		if (clampOn) {
