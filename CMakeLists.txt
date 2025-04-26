@@ -284,3 +284,7 @@ endif()
 if (TCNN_BUILD_BENCHMARK)
 	add_subdirectory("benchmarks/image")
 endif()
+
+## get the shader src directory, transfer it to the cpp
+set(_PROJECT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/samples/config.in.h" "${CMAKE_CURRENT_SOURCE_DIR}/samples/config.h")

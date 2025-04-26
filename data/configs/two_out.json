@@ -1,0 +1,60 @@
+{
+	"images": [
+		"data/images/albert.jpg",
+		"data/images/lena.jpg"
+	],
+	"training_steps": 10000,
+	"test_inference_time": true,
+	"network": {
+		"loss": {
+			"otype": "RelativeL2"
+		},
+		"optimizer": {
+			"otype": "Adam",
+			// "otype": "Shampoo",
+			"learning_rate": 1e-2,
+			"beta1": 0.9,
+			"beta2": 0.99,
+			"l2_reg": 0.0,
+			// The following parameters are only used when the optimizer is "Shampoo".
+			"beta3": 0.9,
+			"beta_shampoo": 0.0,
+			"identity": 0.0001,
+			"cg_on_momentum": false,
+			"frobenius_normalization": true
+		},
+		"encoding": {
+			"n_dims_to_encode": 2,
+			"otype": "HashGrid",
+			"n_levels": 8,
+			"n_features_per_level": 2,
+			"log2_hashmap_size": 19,
+			"base_resolution": 16,
+			"per_level_scale": 2.0
+		},
+		"net_base": {
+			"otype": "FullyFusedMLP",
+			"n_output_dims": 64,
+			"n_neurons": 64,
+			"n_hidden_layers": 1,
+			"activation": "ReLU",
+			"output_activation": "ReLU"
+		},
+		"net1": {
+			"otype": "FullyFusedMLP",
+			"n_input_dims": 64,
+			"n_neurons": 64,
+			"n_hidden_layers": 1,
+			"activation": "ReLU",
+			"output_activation": "None"
+		},
+		"net2": {
+			"otype": "FullyFusedMLP",
+			"n_input_dims": 64,
+			"n_neurons": 64,
+			"n_hidden_layers": 1,
+			"activation": "ReLU",
+			"output_activation": "None"
+		}
+	}
+}

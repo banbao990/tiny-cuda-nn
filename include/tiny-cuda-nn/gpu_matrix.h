@@ -189,9 +189,11 @@ public:
 			cudaStream_t stream = m_arena_allocation->stream();
 			m_arena_allocation.reset();
 			m_arena_allocation = std::make_shared<GPUMemoryArena::Allocation>(allocate_workspace(stream, rows * cols * sizeof(T)));
+			set_data_unsafe((T *) m_arena_allocation->data());
 		} else if (m_malloc_allocation) {
 			m_malloc_allocation.reset();
 			m_malloc_allocation = std::make_shared<GPUMemory<uint8_t>>(rows * cols * sizeof(T));
+			set_data_unsafe((T *) m_malloc_allocation->data());
 		} else {
 			throw std::runtime_error{"GPUMatrix::resize is not permitted when the underlying memory is not owned. Use GPUMatrix::set instead."};
 		}

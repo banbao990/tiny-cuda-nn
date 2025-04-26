@@ -8,3 +8,6 @@ dist
 /.vscode
 /.vs
 /*.jpg
+/samples/config.h
+/outputs
+/CMakeSettings.json
