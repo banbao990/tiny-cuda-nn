@@ -270,6 +270,7 @@ add_library(tiny-cuda-nn STATIC ${TCNN_SOURCES})
 target_compile_definitions(tiny-cuda-nn PUBLIC ${TCNN_DEFINITIONS})
 target_compile_options(tiny-cuda-nn PUBLIC $<$<COMPILE_LANGUAGE:CUDA>:${CUDA_NVCC_FLAGS}>)
 target_include_directories(tiny-cuda-nn PUBLIC
+	${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES} # for visual studio hints
 	"include"
 	"dependencies"
 	"dependencies/cutlass/include"

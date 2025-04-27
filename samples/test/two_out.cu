@@ -18,16 +18,19 @@ public:
 		json net1_opts		= config.value("net1", json::object());
 		json net2_opts		= config.value("net2", json::object());
 
-		assert(network_opts["n_output_dims"] == M_dims_transfer);
-		assert(net1_opts["n_input_dims"] == M_dims_transfer);
-		assert(net2_opts["n_input_dims"] == M_dims_transfer);
+		m_dims_transfer = config.value("internal_dims", 64);
+		std::cout << "Set Internal Dimension: " << m_dims_transfer << std::endl;
+
+		network_opts["n_output_dims"] = m_dims_transfer;
+		net1_opts["n_input_dims"]	  = m_dims_transfer;
+		net2_opts["n_input_dims"]	  = m_dims_transfer;
 
 		net1_opts["n_output_dims"] = dims_output;
 		net2_opts["n_output_dims"] = dims_output;
 
 		// base_net [no loss]
 		m_net_base = std::make_shared<NetworkWithInputEncoding<precision_t>>(
-			n_input_dims, M_dims_transfer, encoding_opts, network_opts);
+			n_input_dims, m_dims_transfer, encoding_opts, network_opts);
 		m_optimizer_base.reset(create_optimizer<precision_t>(optimizer_opts));
 		m_trainer_base = std::make_shared<Trainer<float, precision_t, precision_t>>(
 			m_net_base, m_optimizer_base, nullptr);
@@ -75,9 +78,9 @@ public:
 		}
 
 		m_training_batch_size = batch_size;
-		m_transfer_buffer_y.resize(M_dims_transfer, batch_size);
-		m_transfer_buffer_dL_dy.resize(M_dims_transfer, batch_size);
-		m_transfer_buffer_dL_dy2.resize(M_dims_transfer, batch_size);
+		m_transfer_buffer_y.resize(m_dims_transfer, batch_size);
+		m_transfer_buffer_dL_dy.resize(m_dims_transfer, batch_size);
+		m_transfer_buffer_dL_dy2.resize(m_dims_transfer, batch_size);
 	}
 
 	void set_inference_batch_size(const uint32_t batch_size) {
@@ -85,7 +88,7 @@ public:
 			return;
 		}
 		m_inference_batch_size = batch_size;
-		m_transfer_buffer_inference.resize(M_dims_transfer, batch_size);
+		m_transfer_buffer_inference.resize(m_dims_transfer, batch_size);
 	}
 
 	void inference(cudaStream_t stream, const GPUMatrix<float> &input, GPUMatrix<float> &output1,
@@ -137,7 +140,7 @@ public:
 
 			// [STEP 2.2] accumulate the gradients
 			linear_kernel(calculate_gradient_sum, 0, stream,
-						  M_dims_transfer * m_training_batch_size, m_transfer_buffer_dL_dy.data(),
+						  m_dims_transfer * m_training_batch_size, m_transfer_buffer_dL_dy.data(),
 						  m_transfer_buffer_dL_dy2.data());
 
 			// [STEP 2.3] net_base backward
@@ -180,7 +183,7 @@ private:
 	CudaGraph m_graph;
 
 	uint32_t m_n_input_dims;
-	static constexpr uint32_t M_dims_transfer = 64;
+	uint32_t m_dims_transfer;
 	uint32_t m_dims_output;
 
 	// net_base
@@ -191,15 +194,15 @@ private:
 	std::shared_ptr<Network<precision_t>> m_net_heads[2];
 	std::shared_ptr<Optimizer<precision_t>> m_optimizer_heads[2];
 	std::shared_ptr<Trainer<precision_t, precision_t, precision_t>> m_trainer_heads[2];
-	std::shared_ptr<Loss<precision_t>> m_loss_heads[2];
+	std::shared_ptr<Loss<precision_t>> m_loss_heads[2]; // can share the same one
 
 	uint32_t m_training_batch_size{0};
-	GPUMatrix<precision_t> m_transfer_buffer_y{M_dims_transfer, 1}; // set 1 for resize()
-	GPUMatrix<precision_t> m_transfer_buffer_dL_dy{M_dims_transfer, 1};
-	GPUMatrix<precision_t> m_transfer_buffer_dL_dy2{M_dims_transfer, 1};
+	GPUMatrix<precision_t> m_transfer_buffer_y{1, 1}; // set 1 for resize()
+	GPUMatrix<precision_t> m_transfer_buffer_dL_dy{1, 1};
+	GPUMatrix<precision_t> m_transfer_buffer_dL_dy2{1, 1};
 
 	uint32_t m_inference_batch_size{0};
-	GPUMatrix<precision_t> m_transfer_buffer_inference{M_dims_transfer, 1};
+	GPUMatrix<precision_t> m_transfer_buffer_inference{1, 1};
 };
 
 int main(int argc, char *argv[]) {

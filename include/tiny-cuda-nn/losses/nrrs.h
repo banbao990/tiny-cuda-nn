@@ -1,5 +1,15 @@
 #pragma once
 
+#ifdef __INTELLISENSE__
+#ifndef __CUDACC__
+#define __CUDACC__
+#endif
+#include <crt/device_functions.h>
+#include <cuda_runtime.h>
+#include <device_launch_parameters.h>
+#include <cuda_fp16.h>
+#endif
+
 #define BB_TCNN_DEBUG_MODE
 
 #define BB_RRS_LOSS_SCALE_STEP2 1e0f
