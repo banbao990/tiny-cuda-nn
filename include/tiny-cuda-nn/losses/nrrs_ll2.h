@@ -15,7 +15,8 @@ __global__ void nrrs_ll2_loss(const uint32_t n_elements, const uint32_t stride,
 							  const float loss_scale, const T *__restrict__ predictions,
 							  const float *__restrict__ targets, float *__restrict__ values,
 							  T *__restrict__ gradients, const float *__restrict__ data_pdf,
-							  const bool clampOn, const float clampMax, const bool trainSigma) {
+							  const bool clampOn, const float clampMax, const bool trainSigma,
+							  const bool onlyTrainL) {
 	const uint32_t i = threadIdx.x + blockIdx.x * blockDim.x;
 	if (i >= n_elements) return;
 
@@ -65,6 +66,12 @@ __global__ void nrrs_ll2_loss(const uint32_t n_elements, const uint32_t stride,
 	float grad_mean = scale_mean * 2 * diff / prediction_sq_plus_epsilon;
 	grad_mean		= grad_mean / pdf / n_total;
 	gradients[i]	= (T) (loss_scale * grad_mean);
+
+	if (onlyTrainL && trainSigma) {
+		values[i + BB_L2_OFFSET]	= 0;
+		gradients[i + BB_L2_OFFSET] = 0;
+		return;
+	}
 
 	if (trainSigma) {
 		// #####[sigma]
@@ -121,6 +128,8 @@ __global__ void nrrs_ll2_loss(const uint32_t n_elements, const uint32_t stride,
 
 		// ##### Variance = E[(x - E[x])^2]
 		// loss = || pre - diff2 ||^2 / pre^2
+		const float prediction_desired = onlyTrainL ? 0 : diff2;
+
 		const float prediction_x2	 = (float) predictions[i + BB_L2_OFFSET];
 		const float diff_x2			 = prediction_x2 - diff2;
 		const float diff_x2_2		 = diff_x2 * diff_x2;
@@ -175,32 +184,38 @@ public:
 
 		linear_kernel(nrrs_ll2_loss<T>, 0, stream, prediction.n_elements(), stride, loss_scale,
 					  prediction.data(), target.data(), values.data(), gradients.data(),
-					  data_pdf ? data_pdf->data() : nullptr, mClampOn, mClampMax, mTrainSigma);
+					  data_pdf ? data_pdf->data() : nullptr, mClampOn, mClampMax, mTrainSigma,
+					  mOnlyTrainL);
 	}
 
 	void update_hyperparams(const json &params) override {
 		mClampMax	= params.value("clamp_max", mClampMax);
 		mClampOn	= params.value("clamp_on", mClampOn);
 		mTrainSigma = params.value("train_sigma", mTrainSigma);
+		mStep		= params.value("step", mStep);
+
+		mOnlyTrainL = mStep == 0;
 
 		if (!(params.size() == 1 && params.contains("offset"))) {
-			printf("[NRRS_LL2 Loss] update hyperparams: %s\n", params.dump().c_str());
+			printf("[NRRS_LL2 Loss] update hyperparams: %s,{\"only_train_L\":%d}\n",
+				   params.dump().c_str(), mOnlyTrainL);
 		}
 	}
 
 	json hyperparams() const override {
-		return {
-			{"otype", "NRRS_LL2"},
-			{"clamp_max", mClampMax},
-			{"clamp_on", mClampOn},
-			{"train_sigma", mTrainSigma},
-		};
+		return {{"otype", "NRRS_LL2"},
+				{"clamp_max", mClampMax},
+				{"clamp_on", mClampOn},
+				{"train_sigma", mTrainSigma},
+				{"only_train_L", mOnlyTrainL}};
 	}
 
 private:
+	int mStep{0};
 	bool mClampOn{false};
 	float mClampMax{500.0f};
-	bool mTrainSigma{true}; // train sigma or X2
+	bool mOnlyTrainL{false}; // false: train both L and L2; true: only train L, controlled by step
+	bool mTrainSigma{true};	 // train sigma or X2
 };
 
 } // namespace tcnn
