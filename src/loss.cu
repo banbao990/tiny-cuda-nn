@@ -41,6 +41,8 @@
 #include <tiny-cuda-nn/losses/neural_rrs.h>
 #include <tiny-cuda-nn/losses/nrrs_ll2.h>
 #include <tiny-cuda-nn/losses/nrrs_rrs.h>
+#include <tiny-cuda-nn/losses/twoHead/nrrs_l.h>
+#include <tiny-cuda-nn/losses/twoHead/nrrs_l2.h>
 
 
 namespace tcnn {
@@ -69,7 +71,9 @@ auto register_builtin_losses() {
 	register_loss<T>(factories, "Variance", [](const json& loss) { return new VarianceIsLoss<T>{}; });
 	register_loss<T>(factories, "NeuralRRS", [](const json& loss) { return new NeuralRRSLoss<T>{}; });
 	register_loss<T>(factories, "NRRS_LL2", [](const json& loss) { return new NRRSLL2Loss<T>{}; });
-	register_loss<T>(factories, "NRRS_RRS", [](const json& loss) { return new NRRSRRSLoss<T>{}; });
+	register_loss<T>(factories, "NRRS_RRS", [](const json &loss) { return new NRRSRRSLoss<T>{}; });
+	register_loss<T>(factories, "NRRS_TwoHead_L", [](const json &loss) { return new NRRSTwoHeadLLoss<T>{}; });
+	register_loss<T>(factories, "NRRS_TwoHead_L2", [](const json &loss) { return new NRRSTwoHeadL2Loss<T>{}; });
 
 	return factories;
 }
