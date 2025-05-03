@@ -47,6 +47,8 @@ __global__ void nrrs_rrs_loss(
 	const bool pixelErrorMultiplySamples = false, const float *numberSamples = nullptr
 #ifdef BB_TCNN_DEBUG_MODE
 	,
+	const uint32_t errorImageScale = 1u, const uint32_t frameSizeWidth = 1280u,
+
 	const float *error_per_pixel = nullptr, const uint32_t showLossIndex = 0,
 	const uint32_t *pixelID = nullptr, const int32_t debugPixel = -1,
 	uint32_t *pixel_debug_buffer = nullptr, float pdf_lower_bound = 0.5f, float *grad_max = nullptr
@@ -77,8 +79,7 @@ __global__ void nrrs_rrs_loss(
 		{
 			float c_error = error[thread_idx];
 
-			// just manually check the error
-			int c_pixelIdScaled		= offsetFrame2Scaled(c_pixelId, 1280u, 2u);
+			int c_pixelIdScaled = offsetFrame2Scaled(c_pixelId, frameSizeWidth, errorImageScale);
 			float c_error_per_pixel = error_per_pixel[c_pixelIdScaled];
 
 			if (c_error != c_error_per_pixel) {
@@ -460,6 +461,8 @@ public:
 
 #ifdef BB_TCNN_DEBUG_MODE
 					  ,
+					  mErrorImageScale, mFrameSizeWidth,
+
 					  mErrorPerPixel, mShowLossIndex, pixelIDPtr, mDebugPixel, mPixelDebugBuffer,
 					  mPdfLoweBound, mGradMax
 #endif
@@ -499,6 +502,9 @@ public:
 		mGamma2 = params.value("gamma2", mGamma2);
 		mGamma3 = params.value("gamma3", mGamma3);
 		mGamma4 = params.value("gamma4", mGamma4);
+
+		mErrorImageScale = params.value("error_image_scale", mErrorImageScale);
+		mFrameSizeWidth	 = params.value("frame_size_width", mFrameSizeWidth);
 
 		mPdfLoweBound = params.value("pdf_lower_bound", mPdfLoweBound);
 
@@ -548,6 +554,9 @@ public:
 	float *mRefMean;	// this is 1 floats for each element
 	uint32_t *mPixelID; // the pixel id for each element
 	float *mNumberSamples;
+
+	uint32_t mErrorImageScale{1u};
+	uint32_t mFrameSizeWidth{1280u};
 
 	float *mErrorPerPixel;		 // the error per pixel [Debug]
 	uint32_t *mPixelDebugBuffer; // [Debug]
