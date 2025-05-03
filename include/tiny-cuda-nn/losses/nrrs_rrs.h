@@ -22,6 +22,17 @@ __global__ void prinf_grad(const uint32_t n_elements, float *grad, const uint32_
 	}
 }
 
+// src/render/nrrs/myFilm.h
+__device__ uint32_t offsetFrame2Scaled(const uint32_t offset, const uint32_t frameSizeWidth,
+									   const uint32_t scale) {
+	uint32_t ox			  = offset % frameSizeWidth;
+	uint32_t oy			  = offset / frameSizeWidth;
+	uint32_t sx			  = ox / scale;
+	uint32_t sy			  = oy / scale;
+	uint32_t offsetScaled = sx + sy * (frameSizeWidth / scale);
+	return offsetScaled;
+}
+
 template <typename T>
 __global__ void nrrs_rrs_loss(
 	const uint32_t n_elements, const uint32_t dims, const float loss_scale, const uint32_t step,
@@ -64,12 +75,15 @@ __global__ void nrrs_rrs_loss(
 #ifdef BB_TCNN_DEBUG_MODE
 		uint32_t c_pixelId = pixelID[thread_idx];
 		{
-			float c_error			= error[thread_idx];
-			float c_error_per_pixel = error_per_pixel[c_pixelId];
+			float c_error = error[thread_idx];
+
+			// just manually check the error
+			int c_pixelIdScaled		= offsetFrame2Scaled(c_pixelId, 1280u, 2u);
+			float c_error_per_pixel = error_per_pixel[c_pixelIdScaled];
 
 			if (c_error != c_error_per_pixel) {
-				printf("error[%d]: %g, error_per_pixel[%d]: %g\n", thread_idx, c_error, c_pixelId,
-					   c_error_per_pixel);
+				printf("error[%d]: %g, error_per_pixel[%d]: %g\n", thread_idx, c_error,
+					   c_pixelIdScaled, c_error_per_pixel);
 			}
 		}
 #endif
