@@ -44,7 +44,8 @@ __global__ void nrrs_rrs_loss(
 	const float *__restrict__ data_pdf = nullptr, const bool clampOn = false,
 	const float clampMax = 10.0f, const bool trainSigma = true, const float gamma1 = 1.0f,
 	const float gamma2 = 1.0f, const float gamma3 = 1.0f, const float gamma4 = 1.0f,
-	const bool pixelErrorMultiplySamples = false, const float *numberSamples = nullptr
+	const bool pixelErrorMultiplySamples = false, const float *numberSamples = nullptr,
+	const bool reliefError = false, const float reliefErrorScale = 1.0f
 #ifdef BB_TCNN_DEBUG_MODE
 	,
 	const uint32_t errorImageScale = 1u, const uint32_t frameSizeWidth = 1280u,
@@ -89,7 +90,7 @@ __global__ void nrrs_rrs_loss(
 		}
 #endif
 		// now the output is rrs
-		const float var_sum = *error_sum;
+		const float var_avg = *error_sum / pixels_num;
 
 		const float rrs_loss_scale = 1e0f;
 		const uint32_t n_total	   = n_elements;
@@ -104,7 +105,12 @@ __global__ void nrrs_rrs_loss(
 		// }
 #endif
 
-		const float var = error[thread_idx];
+		float var_tmp = error[thread_idx];
+		if (reliefError) {
+			float var_diff = (var_tmp - var_avg);
+			var_tmp		   = var_avg + var_diff * (var_diff > 0 ? reliefErrorScale : 1.0f);
+		}
+		const float var = var_tmp;
 		// const float path_pdf = fminf(log(pdf[thread_idx] + 1.0f), 10.0f);
 		// const float path_pdf		 = pdf[thread_idx];
 		const float path_pdf		 = 1.0f;
@@ -141,7 +147,7 @@ __global__ void nrrs_rrs_loss(
 			const float net_data_pdf = data_pdf ? data_pdf[thread_idx] : 1.0f;
 
 			// loss
-			const float e1 = var - var_sum / pixels_num;
+			const float e1 = var - var_avg;
 
 			float loss_value_3 = gamma3 * (rrs - rrs_center) * (rrs - rrs_center);
 
@@ -167,8 +173,11 @@ __global__ void nrrs_rrs_loss(
 
 			values[prediction_idx] = loss_value;
 
-			// gradient
+#ifdef BB_TCNN_DEBUG_MODE
+			atomicAdd((float *) pixel_debug_buffer + c_pixelId, fmaxf(loss_value, 0));
+#endif // BB_TCNN_DEBUG_MODE
 
+			// gradient
 #if BB_L1_L2_k == 1
 			float dE_dvar =
 				gamma1 * ((e1 > 0 ? 1 : -1) * (float(pixels_num - 1) / float(pixels_num))) + gamma2;
@@ -280,9 +289,9 @@ __global__ void nrrs_rrs_loss(
 			grad_rrs = grad_coeff * (gamma3 * 2 * (rrs - rrs_center) +
 									 gamma4 * 2 * (rrs - rrs_after_normalization));
 
-			if (abs(grad_min) * n_total > pdf_lower_bound) {
-				atomicAdd(pixel_debug_buffer + c_pixelId, 1u);
-			}
+			// if (abs(grad_min) * n_total > pdf_lower_bound) {
+			//	atomicAdd(pixel_debug_buffer + c_pixelId, 1u);
+			// }
 #endif
 
 #ifdef BB_TCNN_DEBUG_MODE
@@ -294,13 +303,13 @@ __global__ void nrrs_rrs_loss(
 				printf("rrs [%d]: rrs = %g, grad(avg + min + rrs) = %g = %g + %g + %g\n" // 1
 
 					   "var = %g, path_pdf = %g, path_var = %g, "
-					   "dvar_drrs = %g, dE_dvar = %g, rel_inv = %g, e1 = %g, var_sum = %g, "
+					   "dvar_drrs = %g, dE_dvar = %g, rel_inv = %g, e1 = %g, var_avg = %g, "
 					   "pixel_err_weight = %g, ref_mean = %g, ex = %g, rrs_gt_step2 = %g, "
 					   "net_data_pdf = %g, loss_value = %g, pixelId: %d\n\n",
 
 					   thread_idx, rrs, grad, grad_avg, grad_min, grad_rrs, // 1
 
-					   var, path_pdf, path_var, dvar_drrs, dE_dvar, rel_inv, e1, var_sum,
+					   var, path_pdf, path_var, dvar_drrs, dE_dvar, rel_inv, e1, var_avg,
 					   pixel_err_weight, t_ref_mean, ex, rrs_gt_step2, net_data_pdf, loss_value,
 					   c_pixelId);
 			}
@@ -457,7 +466,8 @@ public:
 					  sampleWeightPtr, ll2Ptr, mPixels, prediction.data(), target.data(),
 					  values.data(), gradients.data(), data_pdf ? data_pdf->data() : nullptr,
 					  mClampOn, mClampMax, mTrainSigma, mGamma1, mGamma2, mGamma3, mGamma4,
-					  mPixelErrorMultiplySamples, numberSamplesPerPixel
+					  mPixelErrorMultiplySamples, numberSamplesPerPixel, mReliefError,
+					  mReliefErrorScale
 
 #ifdef BB_TCNN_DEBUG_MODE
 					  ,
@@ -471,9 +481,25 @@ public:
 
 	void update_hyperparams(const json &params) override {
 		// frequently update offset
-		if (params.size() == 1 && params.contains("offset")) {
+		if (params.size() == 1) {
+			if (params.contains("offset")) {
 			mOffset = params.value("offset", mOffset);
 			return;
+		}
+			if (params.contains("update_error_scale")) {
+				if (mReliefError) {
+					mReliefErrorScale *= 0.99f;
+					mReliefErrorScale = fmaxf(mReliefErrorScale, 1e-4f);
+
+					// debug
+					static int cnt = 0;
+					cnt			   = ++cnt % 100;
+					if (cnt == 0) {
+						printf("ReliefErrorScale: %g\n", mReliefErrorScale);
+					}
+				}
+				return;
+			}
 		}
 
 		mDebugPixel	   = params.value("debug_pixel_id", mDebugPixel);
@@ -511,6 +537,8 @@ public:
 		mPixelErrorMultiplySamples =
 			params.value("pixel_error_multiply_samples", mPixelErrorMultiplySamples);
 		mNumberSamples = (float *) params.value("number_samples", (uint64_t) mNumberSamples);
+
+		mReliefError = params.value("relief_error", mReliefError);
 
 		printf("[NRRS_RRS Loss] update hyperparams: %s\n", params.dump().c_str());
 
@@ -565,6 +593,9 @@ public:
 	float mGamma2{1.0f};
 	float mGamma3{1.0f};
 	float mGamma4{1.0f};
+
+	bool mReliefError{false};
+	float mReliefErrorScale{1.0f};
 
 	float mPdfLoweBound{0.01f};
 	bool mPixelErrorMultiplySamples{false};
