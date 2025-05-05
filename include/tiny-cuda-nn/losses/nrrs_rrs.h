@@ -36,7 +36,7 @@ __device__ uint32_t offsetFrame2Scaled(const uint32_t offset, const uint32_t fra
 template <typename T>
 __global__ void nrrs_rrs_loss(
 	const uint32_t n_elements, const uint32_t dims, const float loss_scale, const uint32_t step,
-	const float *__restrict__ thp, const float *__restrict__ pdf, const float *__restrict__ error,
+	const float *__restrict__ thp, const float *__restrict__ error,
 	const float *__restrict__ ref_mean, const float *__restrict__ error_sum,
 	const float *__restrict__ sample_weight, const __half *__restrict__ ll2,
 	const uint32_t pixels_num, const T *__restrict__ predictions, const float *__restrict__ targets,
@@ -52,7 +52,7 @@ __global__ void nrrs_rrs_loss(
 
 	const float *error_per_pixel = nullptr, const uint32_t showLossIndex = 0,
 	const uint32_t *pixelID = nullptr, const int32_t debugPixel = -1,
-	uint32_t *pixel_debug_buffer = nullptr, float pdf_lower_bound = 0.5f, float *grad_max = nullptr
+	uint32_t *pixel_debug_buffer = nullptr, float debug_float = 0.0f, float *grad_max = nullptr
 #endif
 ) {
 
@@ -110,10 +110,7 @@ __global__ void nrrs_rrs_loss(
 			float var_diff = (var_tmp - var_avg);
 			var_tmp		   = var_avg + var_diff * (var_diff > 0 ? reliefErrorScale : 1.0f);
 		}
-		const float var = var_tmp;
-		// const float path_pdf = fminf(log(pdf[thread_idx] + 1.0f), 10.0f);
-		// const float path_pdf		 = pdf[thread_idx];
-		const float path_pdf		 = 1.0f;
+		const float var				 = var_tmp;
 		const float pixel_err_weight = sample_weight[thread_idx];
 
 		float dactivate_drrs = 1.0f;
@@ -133,7 +130,6 @@ __global__ void nrrs_rrs_loss(
 			const float gp = thp[thp_idx + 1];
 			const float bp = thp[thp_idx + 2];
 
-			// const float path_pdf = (rp + gp + bp) / 3.0f;
 			const float g_div_p = (rp + gp + bp) / 3;
 
 			const float rrs_gt_step2 = (r * rp + g * gp + b * bp) / 3.0f;
@@ -174,7 +170,8 @@ __global__ void nrrs_rrs_loss(
 			values[prediction_idx] = loss_value;
 
 #ifdef BB_TCNN_DEBUG_MODE
-			atomicAdd((float *) pixel_debug_buffer + c_pixelId, fmaxf(loss_value, 0));
+			// float loss_value_1 = pixel_err_weight * (gamma1 * e1 * e1);
+			atomicAdd((float *) pixel_debug_buffer + c_pixelId, fmaxf(pixel_err_weight, 0));
 #endif // BB_TCNN_DEBUG_MODE
 
 			// gradient
@@ -243,7 +240,7 @@ __global__ void nrrs_rrs_loss(
 			}
 			// }
 
-			float dvar_drrs = -path_pdf * path_var / max(rrs * rrs, NRRS_EPSILON);
+			float dvar_drrs = -path_var / max(rrs * rrs, NRRS_EPSILON);
 
 			float grad =
 				loss_scale * rrs_loss_scale *
@@ -289,7 +286,7 @@ __global__ void nrrs_rrs_loss(
 			grad_rrs = grad_coeff * (gamma3 * 2 * (rrs - rrs_center) +
 									 gamma4 * 2 * (rrs - rrs_after_normalization));
 
-			// if (abs(grad_min) * n_total > pdf_lower_bound) {
+			// if (abs(grad_min) * n_total > debug_float) {
 			//	atomicAdd(pixel_debug_buffer + c_pixelId, 1u);
 			// }
 #endif
@@ -302,16 +299,15 @@ __global__ void nrrs_rrs_loss(
 				rrs < 0) {
 				printf("rrs [%d]: rrs = %g, grad(avg + min + rrs) = %g = %g + %g + %g\n" // 1
 
-					   "var = %g, path_pdf = %g, path_var = %g, "
+					   "var = %g, path_var = %g, "
 					   "dvar_drrs = %g, dE_dvar = %g, rel_inv = %g, e1 = %g, var_avg = %g, "
 					   "pixel_err_weight = %g, ref_mean = %g, ex = %g, rrs_gt_step2 = %g, "
 					   "net_data_pdf = %g, loss_value = %g, pixelId: %d\n\n",
 
 					   thread_idx, rrs, grad, grad_avg, grad_min, grad_rrs, // 1
 
-					   var, path_pdf, path_var, dvar_drrs, dE_dvar, rel_inv, e1, var_avg,
-					   pixel_err_weight, t_ref_mean, ex, rrs_gt_step2, net_data_pdf, loss_value,
-					   c_pixelId);
+					   var, path_var, dvar_drrs, dE_dvar, rel_inv, e1, var_avg, pixel_err_weight,
+					   t_ref_mean, ex, rrs_gt_step2, net_data_pdf, loss_value, c_pixelId);
 			}
 #endif
 		}
@@ -445,7 +441,6 @@ public:
 		CHECK_THROW(stride == 16);
 
 		const float *thpPtr				   = mThp + mOffset * 3;		   // 3 float
-		const float *pdfPtr				   = mPdf + mOffset * 1;		   // 1 float
 		const float *errorPtr			   = mError + mOffset * 1;		   // 1 float
 		const float *sampleWeightPtr	   = mSampleWeight + mOffset * 1;  // 1 float
 		const float *refPtr				   = mRefMean + mOffset * 1;	   // 1 float
@@ -462,7 +457,7 @@ public:
 #endif
 
 		linear_kernel(nrrs_rrs_loss<T>, 0, stream, prediction.n_elements() / stride, dims,
-					  loss_scale, mStep, thpPtr, pdfPtr, errorPtr, refPtr, mLossSumErrorGPUPtr,
+					  loss_scale, mStep, thpPtr, errorPtr, refPtr, mLossSumErrorGPUPtr,
 					  sampleWeightPtr, ll2Ptr, mPixels, prediction.data(), target.data(),
 					  values.data(), gradients.data(), data_pdf ? data_pdf->data() : nullptr,
 					  mClampOn, mClampMax, mTrainSigma, mGamma1, mGamma2, mGamma3, mGamma4,
@@ -474,7 +469,7 @@ public:
 					  mErrorImageScale, mFrameSizeWidth,
 
 					  mErrorPerPixel, mShowLossIndex, pixelIDPtr, mDebugPixel, mPixelDebugBuffer,
-					  mPdfLoweBound, mGradMax
+					  mDebugFloat, mGradMax
 #endif
 		);
 	}
@@ -483,9 +478,9 @@ public:
 		// frequently update offset
 		if (params.size() == 1) {
 			if (params.contains("offset")) {
-			mOffset = params.value("offset", mOffset);
-			return;
-		}
+				mOffset = params.value("offset", mOffset);
+				return;
+			}
 			if (params.contains("update_error_scale")) {
 				if (mReliefError) {
 					mReliefErrorScale *= 0.99f;
@@ -511,7 +506,6 @@ public:
 		mPixels		   = params.value("pixels", mPixels);
 
 		mThp		  = (float *) params.value("thp", (uint64_t) mThp);
-		mPdf		  = (float *) params.value("pdf", (uint64_t) mPdf);
 		mError		  = (float *) params.value("error", (uint64_t) mError);
 		mRefMean	  = (float *) params.value("ref_mean", (uint64_t) mRefMean);
 		mSampleWeight = (float *) params.value("sample_weight", (uint64_t) mSampleWeight);
@@ -532,7 +526,7 @@ public:
 		mErrorImageScale = params.value("error_image_scale", mErrorImageScale);
 		mFrameSizeWidth	 = params.value("frame_size_width", mFrameSizeWidth);
 
-		mPdfLoweBound = params.value("pdf_lower_bound", mPdfLoweBound);
+		mDebugFloat = params.value("debug_float", mDebugFloat);
 
 		mPixelErrorMultiplySamples =
 			params.value("pixel_error_multiply_samples", mPixelErrorMultiplySamples);
@@ -575,7 +569,6 @@ public:
 	uint32_t mPixels{1u}; // the number of pixels
 	uint32_t mOffset{0};  // offset for read the following data
 	float *mThp;
-	float *mPdf;
 	float *mError;
 	float *mSampleWeight;
 	__half *mLL2;		// the l,l2 for each element
@@ -597,7 +590,7 @@ public:
 	bool mReliefError{false};
 	float mReliefErrorScale{1.0f};
 
-	float mPdfLoweBound{0.01f};
+	float mDebugFloat{0};
 	bool mPixelErrorMultiplySamples{false};
 
 	float *mLossSumErrorGPUPtr; // the GPU address of the sum of error
