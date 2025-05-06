@@ -74,6 +74,13 @@ __global__ void nrrs_rrs_loss(
 	}
 
 	if (step == 3) {
+		const float rrs_after_normalization = targets[thread_idx];
+		if (rrs_after_normalization == -1) {
+			values[prediction_idx]	  = 0;
+			gradients[prediction_idx] = 0;
+			// printf("skip [%d]: %g\n", thread_idx, rrs_after_normalization);
+			return;
+		}
 
 #ifdef BB_TCNN_DEBUG_MODE
 		uint32_t c_pixelId = pixelID[thread_idx];
@@ -147,7 +154,6 @@ __global__ void nrrs_rrs_loss(
 
 			float loss_value_3 = gamma3 * (rrs - rrs_center) * (rrs - rrs_center);
 
-			const float rrs_after_normalization = targets[thread_idx];
 			// if (thread_idx % 400000 == 0) {
 			// 	printf("[%d] rrs = %g, rrs(normalized) = %g\n", thread_idx, rrs,
 			// 		   rrs_after_normalization);
@@ -187,7 +193,7 @@ __global__ void nrrs_rrs_loss(
 				float num_samples = numberSamples[thread_idx];
 				// printf("check all code call atomicAdd(mPixelState->mNumSamples, ...), %g\n",
 				//    num_samples);
-				dE_dvar *= num_samples * 0.1f;
+				dE_dvar = dE_dvar / num_samples;
 			} else {
 				// the same
 			}
