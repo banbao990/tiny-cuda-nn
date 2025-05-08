@@ -34,16 +34,17 @@ __device__ uint32_t offsetFrame2Scaled(const uint32_t offset, const uint32_t fra
 }
 
 template <typename T>
-__global__ void nrrs_rrs_loss(
-	const uint32_t n_elements, const uint32_t dims, const float loss_scale, const uint32_t step,
-	const float *__restrict__ thp, const float *__restrict__ error,
+__global__ void
+nrrs_rrs_loss(const uint32_t n_elements, const uint32_t dims, const float loss_scale,
+			  const uint32_t step, const float *__restrict__ thp, const float *__restrict__ error,
 	const float *__restrict__ ref_mean, const float *__restrict__ error_sum,
 	const float *__restrict__ sample_weight, const __half *__restrict__ ll2,
-	const uint32_t pixels_num, const T *__restrict__ predictions, const float *__restrict__ targets,
-	float *__restrict__ values, T *__restrict__ gradients,
-	const float *__restrict__ data_pdf = nullptr, const bool clampOn = false,
-	const float clampMax = 10.0f, const bool trainSigma = true, const float gamma1 = 1.0f,
-	const float gamma2 = 1.0f, const float gamma3 = 1.0f, const float gamma4 = 1.0f,
+			  const uint32_t pixels_num, const T *__restrict__ predictions,
+			  const float *__restrict__ targets, float *__restrict__ values,
+			  T *__restrict__ gradients, const float *__restrict__ data_pdf = nullptr,
+			  const bool clampOn = false, const float clampMax = 10.0f,
+			  const bool trainSigma = true, const float gamma1 = 1.0f, const float gamma2 = 1.0f,
+			  const float gamma3 = 1.0f, const float gamma4 = 1.0f,
 	const bool pixelErrorMultiplySamples = false, const float *numberSamples = nullptr,
 	const bool reliefError = false, const float reliefErrorScale = 1.0f
 #ifdef BB_TCNN_DEBUG_MODE
@@ -52,7 +53,8 @@ __global__ void nrrs_rrs_loss(
 
 	const float *error_per_pixel = nullptr, const uint32_t showLossIndex = 0,
 	const uint32_t *pixelID = nullptr, const int32_t debugPixel = -1,
-	uint32_t *pixel_debug_buffer = nullptr, float debug_float = 0.0f, float *grad_max = nullptr
+			  uint32_t *pixel_debug_buffer = nullptr, float debug_float = 0.0f,
+			  float *grad_max = nullptr, const int debug_int = 0
 #endif
 ) {
 
@@ -166,7 +168,9 @@ __global__ void nrrs_rrs_loss(
 #if BB_L1_L2_k == 1
 			float loss_value_12 = gamma1 * abs(e1) + gamma2 * var;
 #elif BB_L1_L2_k == 2
-			float loss_value_12 = gamma1 * e1 * e1 + gamma2 * var * var;
+			const float var_avg_sq = 1.0f / (var_avg * var_avg + NRRS_EPSILON);
+			float loss_value_12	   = gamma1 * e1 * e1 + gamma2 * var * var;
+			loss_value_12 *= var_avg_sq;
 #endif
 
 			const float loss_value =
@@ -185,8 +189,11 @@ __global__ void nrrs_rrs_loss(
 			float dE_dvar =
 				gamma1 * ((e1 > 0 ? 1 : -1) * (float(pixels_num - 1) / float(pixels_num))) + gamma2;
 #elif BB_L1_L2_k == 2
-			float dE_dvar =
-				gamma1 * (2 * e1 * (float(pixels_num - 1) / float(pixels_num))) + gamma2 * 2 * var;
+			float dE_dvar = gamma1 * 2 * e1 + gamma2 * 2 * var;
+			dE_dvar *= var_avg_sq;
+
+			// float dE_dvar =
+			//	gamma1 * (2 * e1 * (float(pixels_num - 1) / float(pixels_num))) + gamma2 * 2 * var;
 #endif
 
 			if (pixelErrorMultiplySamples) {
@@ -475,7 +482,7 @@ public:
 					  mErrorImageScale, mFrameSizeWidth,
 
 					  mErrorPerPixel, mShowLossIndex, pixelIDPtr, mDebugPixel, mPixelDebugBuffer,
-					  mDebugFloat, mGradMax
+					  mDebugFloat, mGradMax, mDebugInt
 #endif
 		);
 	}
@@ -521,6 +528,8 @@ public:
 		mPixelID = (uint32_t *) params.value("pixel_id", (uint64_t) mPixelID);
 
 		mErrorPerPixel = (float *) params.value("error_per_pixel", (uint64_t) mErrorPerPixel);
+
+		mDebugInt = params.value("debug_int", mDebugInt);
 		mPixelDebugBuffer =
 			(uint32_t *) params.value("pixel_debug_buffer", (uint64_t) mPixelDebugBuffer);
 
@@ -587,6 +596,7 @@ public:
 
 	float *mErrorPerPixel;		 // the error per pixel [Debug]
 	uint32_t *mPixelDebugBuffer; // [Debug]
+	int mDebugInt{0};			 // [Debug]
 
 	float mGamma1{1.0f};
 	float mGamma2{1.0f};
