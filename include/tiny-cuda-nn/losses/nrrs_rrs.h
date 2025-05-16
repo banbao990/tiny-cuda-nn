@@ -37,22 +37,22 @@ template <typename T>
 __global__ void
 nrrs_rrs_loss(const uint32_t n_elements, const uint32_t dims, const float loss_scale,
 			  const uint32_t step, const float *__restrict__ thp, const float *__restrict__ error,
-	const float *__restrict__ ref_mean, const float *__restrict__ error_sum,
-	const float *__restrict__ sample_weight, const __half *__restrict__ ll2,
+			  const float *__restrict__ ref_mean, const float *__restrict__ error_sum,
+			  const float *__restrict__ sample_weight, const __half *__restrict__ ll2,
 			  const uint32_t pixels_num, const T *__restrict__ predictions,
 			  const float *__restrict__ targets, float *__restrict__ values,
 			  T *__restrict__ gradients, const float *__restrict__ data_pdf = nullptr,
 			  const bool clampOn = false, const float clampMax = 10.0f,
 			  const bool trainSigma = true, const float gamma1 = 1.0f, const float gamma2 = 1.0f,
 			  const float gamma3 = 1.0f, const float gamma4 = 1.0f,
-	const bool pixelErrorMultiplySamples = false, const float *numberSamples = nullptr,
-	const bool reliefError = false, const float reliefErrorScale = 1.0f
+			  const bool pixelErrorMultiplySamples = false, const float *numberSamples = nullptr,
+			  const bool reliefError = false, const float reliefErrorScale = 1.0f
 #ifdef BB_TCNN_DEBUG_MODE
-	,
-	const uint32_t errorImageScale = 1u, const uint32_t frameSizeWidth = 1280u,
+			  ,
+			  const uint32_t errorImageScale = 1u, const uint32_t frameSizeWidth = 1280u,
 
-	const float *error_per_pixel = nullptr, const uint32_t showLossIndex = 0,
-	const uint32_t *pixelID = nullptr, const int32_t debugPixel = -1,
+			  const float *error_per_pixel = nullptr, const uint32_t showLossIndex = 0,
+			  const uint32_t *pixelID = nullptr, const int32_t debugPixel = -1,
 			  uint32_t *pixel_debug_buffer = nullptr, float debug_float = 0.0f,
 			  float *grad_max = nullptr, const int debug_int = 0
 #endif
@@ -160,15 +160,17 @@ nrrs_rrs_loss(const uint32_t n_elements, const uint32_t dims, const float loss_s
 			// 	printf("[%d] rrs = %g, rrs(normalized) = %g\n", thread_idx, rrs,
 			// 		   rrs_after_normalization);
 			// }
-			float loss_value_4 =
-				gamma4 * (rrs - rrs_after_normalization) * (rrs - rrs_after_normalization);
+			float rrs_after_normalization_sq = 1.0f;
+			// 1.0f / (rrs_after_normalization * rrs_after_normalization + NRRS_EPSILON);
+			float loss_value_4 = gamma4 * (rrs - rrs_after_normalization) *
+								 (rrs - rrs_after_normalization) * rrs_after_normalization_sq;
 
 #define BB_L1_L2_k 2
 
 #if BB_L1_L2_k == 1
 			float loss_value_12 = gamma1 * abs(e1) + gamma2 * var;
 #elif BB_L1_L2_k == 2
-			const float var_avg_sq = 1.0f / (var_avg * var_avg + NRRS_EPSILON);
+			const float var_avg_sq = 1.0f; // / (var_avg * var_avg + NRRS_EPSILON);
 			float loss_value_12	   = gamma1 * e1 * e1 + gamma2 * var * var;
 			loss_value_12 *= var_avg_sq;
 #endif
@@ -181,7 +183,7 @@ nrrs_rrs_loss(const uint32_t n_elements, const uint32_t dims, const float loss_s
 
 #ifdef BB_TCNN_DEBUG_MODE
 			// float loss_value_1 = pixel_err_weight * (gamma1 * e1 * e1);
-			atomicAdd((float *) pixel_debug_buffer + c_pixelId, fmaxf(pixel_err_weight, 0));
+			// atomicAdd((float *) pixel_debug_buffer + c_pixelId, fmaxf(pixel_err_weight, 0));
 #endif // BB_TCNN_DEBUG_MODE
 
 			// gradient
@@ -258,7 +260,8 @@ nrrs_rrs_loss(const uint32_t n_elements, const uint32_t dims, const float loss_s
 			float grad =
 				loss_scale * rrs_loss_scale *
 				(pixel_err_weight * (dE_dvar * rel_inv * dvar_drrs) +
-				 gamma3 * 2 * (rrs - rrs_center) + gamma4 * 2 * (rrs - rrs_after_normalization)) *
+				 gamma3 * 2 * (rrs - rrs_center) +
+				 gamma4 * 2 * (rrs - rrs_after_normalization) * rrs_after_normalization_sq) *
 				dactivate_drrs;
 
 			// grad = fmaxf(-1e1f, fminf(1e1f, grad));
@@ -299,10 +302,21 @@ nrrs_rrs_loss(const uint32_t n_elements, const uint32_t dims, const float loss_s
 			grad_rrs = grad_coeff * (gamma3 * 2 * (rrs - rrs_center) +
 									 gamma4 * 2 * (rrs - rrs_after_normalization));
 
-			// if (abs(grad_min) * n_total > debug_float) {
-			//	atomicAdd(pixel_debug_buffer + c_pixelId, 1u);
-			// }
-#endif
+			if (debug_int == 0) {
+				float loss_value_1 = pixel_err_weight * (gamma1 * e1 * e1 * var_avg_sq);
+				atomicAdd((float *) pixel_debug_buffer + c_pixelId, fmaxf(loss_value_1, 0));
+			} else if (debug_int == 1) {
+				float loss_value2 = pixel_err_weight * (gamma2 * var * var);
+				atomicAdd((float *) pixel_debug_buffer + c_pixelId, fmaxf(loss_value2, 0));
+			} else if (debug_int == 2) {
+				atomicAdd((float *) pixel_debug_buffer + c_pixelId, fmaxf(loss_value_4, 0));
+			} else if (debug_int == 3) {
+				atomicAdd((float *) pixel_debug_buffer + c_pixelId,
+						  pixel_err_weight * loss_value_12 + loss_value_3 + loss_value_4);
+			} else if (debug_int == 4) {
+				atomicAdd((float *) pixel_debug_buffer + c_pixelId, fmaxf(loss_value_3, 0));
+			}
+#endif // BB_TCNN_DEBUG_MODE
 
 #ifdef BB_TCNN_DEBUG_MODE
 			const bool should_debug =
