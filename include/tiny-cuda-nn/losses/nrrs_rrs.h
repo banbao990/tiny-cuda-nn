@@ -77,7 +77,7 @@ nrrs_rrs_loss(const uint32_t n_elements, const uint32_t dims, const float loss_s
 
 	if (step == 3) {
 		const float rrs_after_normalization = targets[thread_idx];
-		if (rrs_after_normalization == -1) {
+		if (rrs_after_normalization < 0) {
 			values[prediction_idx]	  = 0;
 			gradients[prediction_idx] = 0;
 			// printf("skip [%d]: %g\n", thread_idx, rrs_after_normalization);
@@ -161,7 +161,10 @@ nrrs_rrs_loss(const uint32_t n_elements, const uint32_t dims, const float loss_s
 			// 		   rrs_after_normalization);
 			// }
 			float rrs_after_normalization_sq = 1.0f;
-			// 1.0f / (rrs_after_normalization * rrs_after_normalization + NRRS_EPSILON);
+			// if (rrs_after_normalization <= 1.0f) {
+			//	rrs_after_normalization_sq =
+			//		1.0f / (rrs_after_normalization * rrs_after_normalization + NRRS_EPSILON);
+			// }
 			float loss_value_4 = gamma4 * (rrs - rrs_after_normalization) *
 								 (rrs - rrs_after_normalization) * rrs_after_normalization_sq;
 

@@ -45,6 +45,15 @@ __global__ void nrrs_ll2_loss(const uint32_t n_elements, const uint32_t stride,
 
 	const float target = targets[target_idx];
 
+	// ignore data if target is negative [dropped data]
+	if (target < 0) {
+		values[i]					= 0;
+		values[i + BB_L2_OFFSET]	= 0;
+		gradients[i]				= 0;
+		gradients[i + BB_L2_OFFSET] = 0;
+		return;
+	}
+
 	// #####[mean]
 	// no activation for mean
 	const float mean = (float) predictions[i];
