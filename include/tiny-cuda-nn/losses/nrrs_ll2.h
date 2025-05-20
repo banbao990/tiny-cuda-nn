@@ -145,12 +145,13 @@ __global__ void nrrs_ll2_loss(const uint32_t n_elements, const uint32_t stride,
 		const float prediction_x2_sq = prediction_x2 * prediction_x2 + NRRS_EPSILON;
 
 #ifdef BB_TCNN_DEBUG_MODE
-		if ((isinf(target_desired) || isnan(target_desired) || isnan(prediction_sq_plus_epsilon)) ||
+		if (isnan(loss_mean) ||
+			(isinf(target_desired) || isnan(target_desired) || isnan(prediction_sq_plus_epsilon)) ||
 			(isinf(diff_x2_2) || isnan(diff_x2_2) || isnan(prediction_x2_sq))) {
-			printf("[%d]: [L] prediction = %g, target = %g, diff = %g, "
+			printf("[%d]: [L] prediction = %g, target = %g, diff = %g, loss_mean = %g"
 				   "[Var] prediction_x2 = %g, target = %g, diff_x2 = %g\n",
 
-				   i, mean, target, diff, prediction_x2, target_desired, diff_x2);
+				   i, mean, target, diff, loss_mean, prediction_x2, target_desired, diff_x2);
 		}
 #endif
 
@@ -166,10 +167,10 @@ __global__ void nrrs_ll2_loss(const uint32_t n_elements, const uint32_t stride,
 		gradients[i + BB_L2_OFFSET] = (T) (loss_scale * grad_x2);
 
 		// check nan
-		// if (isnan(loss_x2) || isinf(loss_x2) || isnan(gradient_x2) || isinf(gradient_x2)) {
-		// 	printf("L2 [%d]: loss_x2 = %g, gradient_x2 = %g, prediction = %g, L2 = %g\n", i,
-		// 		   loss_x2, gradient_x2, (float) predictions[i + 1], (float) predictions[i]);
-		// }
+		if (isnan(loss_x2) || isinf(loss_x2) || isnan(grad_x2) || isinf(grad_x2)) {
+			printf("L2 [%d]: loss_x2 = %g, gradient_x2 = %g, prediction = %g, L2 = %g\n", i,
+				   loss_x2, grad_x2, (float) predictions[i + BB_L2_OFFSET], target_desired);
+		}
 	}
 
 	// values[i + BB_L2_OFFSET]	= 0;

@@ -22,6 +22,20 @@ __global__ void prinf_grad(const uint32_t n_elements, float *grad, const uint32_
 	}
 }
 
+template <typename T>
+__global__ void nrrs_check_nan(const uint32_t n_elements, const T *__restrict__ predictions) {
+	const uint32_t thread_idx = threadIdx.x + blockIdx.x * blockDim.x;
+	if (thread_idx >= n_elements) return;
+
+	int base = thread_idx * 16;
+	for (int i = 0; i < 16; i++) {
+		float v = predictions[base + i];
+		if (isnan(v) || isinf(v)) {
+			printf("predictions[%d]: %g\n", thread_idx, v);
+		}
+	}
+}
+
 // src/render/nrrs/myFilm.h
 __device__ uint32_t offsetFrame2Scaled(const uint32_t offset, const uint32_t frameSizeWidth,
 									   const uint32_t scale) {
@@ -34,27 +48,26 @@ __device__ uint32_t offsetFrame2Scaled(const uint32_t offset, const uint32_t fra
 }
 
 template <typename T>
-__global__ void
-nrrs_rrs_loss(const uint32_t n_elements, const uint32_t dims, const float loss_scale,
-			  const uint32_t step, const float *__restrict__ thp, const float *__restrict__ error,
-			  const float *__restrict__ ref_mean, const float *__restrict__ error_sum,
-			  const float *__restrict__ sample_weight, const __half *__restrict__ ll2,
-			  const uint32_t pixels_num, const T *__restrict__ predictions,
-			  const float *__restrict__ targets, float *__restrict__ values,
-			  T *__restrict__ gradients, const float *__restrict__ data_pdf = nullptr,
-			  const bool clampOn = false, const float clampMax = 10.0f,
-			  const bool trainSigma = true, const float gamma1 = 1.0f, const float gamma2 = 1.0f,
-			  const float gamma3 = 1.0f, const float gamma4 = 1.0f,
-			  const bool pixelErrorMultiplySamples = false, const float *numberSamples = nullptr,
-			  const bool reliefError = false, const float reliefErrorScale = 1.0f
+__global__ void nrrs_rrs_loss(
+	const uint32_t n_elements, const uint32_t dims, const float loss_scale, const uint32_t step,
+	const float *__restrict__ thp, const float *__restrict__ error_for_min,
+	const float *__restrict__ error_for_avg, const float *__restrict__ ref_mean,
+	const float *__restrict__ error_sum, const float *__restrict__ sample_weight,
+	const __half *__restrict__ ll2, const uint32_t pixels_num, const T *__restrict__ predictions,
+	const float *__restrict__ targets, float *__restrict__ values, T *__restrict__ gradients,
+	const float *__restrict__ data_pdf = nullptr, const bool clampOn = false,
+	const float clampMax = 10.0f, const bool trainSigma = true, const float gamma1 = 1.0f,
+	const float gamma2 = 1.0f, const float gamma3 = 1.0f, const float gamma4 = 1.0f,
+	const bool pixelErrorMultiplySamples = false, const float *numberSamples = nullptr,
+	const bool reliefError = false, const float reliefErrorScale = 1.0f
 #ifdef BB_TCNN_DEBUG_MODE
-			  ,
-			  const uint32_t errorImageScale = 1u, const uint32_t frameSizeWidth = 1280u,
+	,
+	const uint32_t errorImageScale = 1u, const uint32_t frameSizeWidth = 1280u,
 
-			  const float *error_per_pixel = nullptr, const uint32_t showLossIndex = 0,
-			  const uint32_t *pixelID = nullptr, const int32_t debugPixel = -1,
-			  uint32_t *pixel_debug_buffer = nullptr, float debug_float = 0.0f,
-			  float *grad_max = nullptr, const int debug_int = 0
+	const float *error_per_pixel = nullptr, const uint32_t showLossIndex = 0,
+	const uint32_t *pixelID = nullptr, const int32_t debugPixel = -1,
+	uint32_t *pixel_debug_buffer = nullptr, float debug_float = 0.0f, float *grad_max = nullptr,
+	const int debug_int = 0
 #endif
 ) {
 
@@ -87,7 +100,7 @@ nrrs_rrs_loss(const uint32_t n_elements, const uint32_t dims, const float loss_s
 #ifdef BB_TCNN_DEBUG_MODE
 		uint32_t c_pixelId = pixelID[thread_idx];
 		{
-			float c_error = error[thread_idx];
+			float c_error = error_for_min[thread_idx];
 
 			int c_pixelIdScaled = offsetFrame2Scaled(c_pixelId, frameSizeWidth, errorImageScale);
 			float c_error_per_pixel = error_per_pixel[c_pixelIdScaled];
@@ -114,7 +127,7 @@ nrrs_rrs_loss(const uint32_t n_elements, const uint32_t dims, const float loss_s
 		// }
 #endif
 
-		float var_tmp = error[thread_idx];
+		float var_tmp = error_for_avg[thread_idx];
 		if (reliefError) {
 			float var_diff = (var_tmp - var_avg);
 			var_tmp		   = var_avg + var_diff * (var_diff > 0 ? reliefErrorScale : 1.0f);
@@ -170,11 +183,13 @@ nrrs_rrs_loss(const uint32_t n_elements, const uint32_t dims, const float loss_s
 
 #define BB_L1_L2_k 2
 
+			const float _error_for_min = error_for_min[thread_idx];
+
 #if BB_L1_L2_k == 1
-			float loss_value_12 = gamma1 * abs(e1) + gamma2 * var;
+			float loss_value_12 = gamma1 * abs(e1) + gamma2 * _error_for_min;
 #elif BB_L1_L2_k == 2
 			const float var_avg_sq = 1.0f; // / (var_avg * var_avg + NRRS_EPSILON);
-			float loss_value_12	   = gamma1 * e1 * e1 + gamma2 * var * var;
+			float loss_value_12	   = gamma1 * e1 * e1 + gamma2 * _error_for_min * _error_for_min;
 			loss_value_12 *= var_avg_sq;
 #endif
 
@@ -194,21 +209,24 @@ nrrs_rrs_loss(const uint32_t n_elements, const uint32_t dims, const float loss_s
 			float dE_dvar =
 				gamma1 * ((e1 > 0 ? 1 : -1) * (float(pixels_num - 1) / float(pixels_num))) + gamma2;
 #elif BB_L1_L2_k == 2
-			float dE_dvar = gamma1 * 2 * e1 + gamma2 * 2 * var;
-			dE_dvar *= var_avg_sq;
-
-			// float dE_dvar =
-			//	gamma1 * (2 * e1 * (float(pixels_num - 1) / float(pixels_num))) + gamma2 * 2 * var;
-#endif
+			float grad_for_avg = gamma1 * 2 * e1;
 
 			if (pixelErrorMultiplySamples) {
 				float num_samples = numberSamples[thread_idx];
 				// printf("check all code call atomicAdd(mPixelState->mNumSamples, ...), %g\n",
 				//    num_samples);
-				dE_dvar = dE_dvar / num_samples;
+				// grad_for_avg = grad_for_avg / num_samples;
+				grad_for_avg = grad_for_avg / sqrtf(num_samples);
 			} else {
 				// the same
 			}
+
+			float dE_dvar = grad_for_avg + gamma2 * 2 * _error_for_min;
+			dE_dvar *= var_avg_sq;
+
+			// float dE_dvar =
+			//	gamma1 * (2 * e1 * (float(pixels_num - 1) / float(pixels_num))) + gamma2 * 2 * var;
+#endif
 
 			// throughput^2
 			dE_dvar *= g_div_p * g_div_p;
@@ -414,11 +432,14 @@ nrrs_rrs_loss(const uint32_t n_elements, const uint32_t dims, const float loss_s
 		gradients[prediction_idx] =
 			(T) (BB_RRS_LOSS_SCALE_STEP2 * scale * loss_scale * gradient / n_total);
 
-		// if (isnan(v) || isinf(v) || isnan(gradient) || isinf(gradient)) {
-		// 	printf("rrs [%d]: v = %g, gradient = %g, rrs_gt = %g, prediction = %g, L = %g\n",
-		// 		   thread_idx, v, gradient, rrs_gt, prediction,
-		// 		   (float) predictions[prediction_idx + 0]);
-		// }
+		if (isinf(values[prediction_idx]) || isnan(values[prediction_idx]) ||
+			isinf(float(gradients[prediction_idx])) || isnan(float(gradients[prediction_idx])) ||
+			isnan(v) || isinf(v) || isnan(gradient) || isinf(gradient)) {
+			printf("rrs [%d]: v = %g, gradient = %g, rrs_gt = %g, prediction = %g, L = %g, "
+				   "prediction_ori = %g\n",
+				   thread_idx, v, gradient, rrs_gt, prediction, (float) predictions[prediction_idx],
+				   prediction_ori);
+		}
 
 		// if (step == 2) {
 		// 	// d(output)/d(L)
@@ -472,6 +493,7 @@ public:
 
 		const float *thpPtr				   = mThp + mOffset * 3;		   // 3 float
 		const float *errorPtr			   = mError + mOffset * 1;		   // 1 float
+		const float *errorForAvgPtr		   = mErrorForAvg + mOffset * 1;   // 1 float
 		const float *sampleWeightPtr	   = mSampleWeight + mOffset * 1;  // 1 float
 		const float *refPtr				   = mRefMean + mOffset * 1;	   // 1 float
 		const uint32_t *pixelIDPtr		   = mPixelID + mOffset * 1;	   // 1 uint32_t
@@ -485,14 +507,20 @@ public:
 		// }
 		// linear_kernel(prinf_grad, 0, stream, 1, mGradMax, mOffset, mStep);
 #endif
+		//{
+		//	static int nan_cnt = 0;
+		//	linear_kernel(nrrs_check_nan<T>, 0, stream, prediction.n_elements() / stride,
+		//				  prediction.data());
+		//	printf("check nan: %d\n", ++nan_cnt);
+		//}
 
 		linear_kernel(nrrs_rrs_loss<T>, 0, stream, prediction.n_elements() / stride, dims,
-					  loss_scale, mStep, thpPtr, errorPtr, refPtr, mLossSumErrorGPUPtr,
-					  sampleWeightPtr, ll2Ptr, mPixels, prediction.data(), target.data(),
-					  values.data(), gradients.data(), data_pdf ? data_pdf->data() : nullptr,
-					  mClampOn, mClampMax, mTrainSigma, mGamma1, mGamma2, mGamma3, mGamma4,
-					  mPixelErrorMultiplySamples, numberSamplesPerPixel, mReliefError,
-					  mReliefErrorScale
+					  loss_scale, mStep, thpPtr, errorPtr, errorForAvgPtr, refPtr,
+					  mLossSumErrorGPUPtr, sampleWeightPtr, ll2Ptr, mPixels, prediction.data(),
+					  target.data(), values.data(), gradients.data(),
+					  data_pdf ? data_pdf->data() : nullptr, mClampOn, mClampMax, mTrainSigma,
+					  mGamma1, mGamma2, mGamma3, mGamma4, mPixelErrorMultiplySamples,
+					  numberSamplesPerPixel, mReliefError, mReliefErrorScale
 
 #ifdef BB_TCNN_DEBUG_MODE
 					  ,
@@ -537,6 +565,7 @@ public:
 
 		mThp		  = (float *) params.value("thp", (uint64_t) mThp);
 		mError		  = (float *) params.value("error", (uint64_t) mError);
+		mErrorForAvg  = (float *) params.value("error_for_avg", (uint64_t) mErrorForAvg);
 		mRefMean	  = (float *) params.value("ref_mean", (uint64_t) mRefMean);
 		mSampleWeight = (float *) params.value("sample_weight", (uint64_t) mSampleWeight);
 		mLL2		  = (__half *) params.value("ll2", (uint64_t) mLL2);
@@ -602,6 +631,7 @@ public:
 	uint32_t mOffset{0};  // offset for read the following data
 	float *mThp;
 	float *mError;
+	float *mErrorForAvg;
 	float *mSampleWeight;
 	__half *mLL2;		// the l,l2 for each element
 	float *mRefMean;	// this is 1 floats for each element
