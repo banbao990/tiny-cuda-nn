@@ -216,7 +216,7 @@ __global__ void nrrs_rrs_loss(
 				// printf("check all code call atomicAdd(mPixelState->mNumSamples, ...), %g\n",
 				//    num_samples);
 				// grad_for_avg = grad_for_avg / num_samples;
-				grad_for_avg = grad_for_avg / sqrtf(num_samples);
+				grad_for_avg = grad_for_avg * sqrtf(num_samples);
 			} else {
 				// the same
 			}
