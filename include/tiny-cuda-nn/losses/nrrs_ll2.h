@@ -9,22 +9,27 @@
 #include <tiny-cuda-nn/loss.h>
 
 namespace tcnn {
+#define BB_COST_OFFSET 6
 
-template <typename T>
-__global__ void nrrs_ll2_loss(const uint32_t n_elements, const uint32_t stride,
+template <typename T, bool tTrainCost = false>
+__global__ void nrrs_ll2_loss(const uint32_t n_elements, const uint32_t stride, const uint32_t dims,
 							  const float loss_scale, const T *__restrict__ predictions,
 							  const float *__restrict__ targets, float *__restrict__ values,
 							  T *__restrict__ gradients, const float *__restrict__ data_pdf,
 							  const bool clampOn, const float clampMax, const bool trainSigma,
-							  const bool onlyTrainL) {
+							  const bool onlyTrainL
+#ifdef BB_TCNN_DEBUG_MODE
+							  ,
+							  const int showLossIndexEARS = 1
+#endif
+) {
 	const uint32_t i = threadIdx.x + blockIdx.x * blockDim.x;
 	if (i >= n_elements) return;
 
 	const uint32_t intra_elem_idx = i % stride;
 	const uint32_t inter_elem_idx = i / stride;
-	const uint32_t training_dims  = 6; // orignial is dims
-	const uint32_t calc_dims	  = 3; // x calc data(x) & data(x+1)
-	constexpr uint32_t dims		  = 6;
+	const uint32_t training_dims  = 6 + (tTrainCost ? 1 : 0); // orignial is dims
+	const uint32_t calc_dims	  = 3;						  // x calc data(x) & data(x+1)
 
 	if (intra_elem_idx >= training_dims) {
 		values[i]	 = 0;
@@ -51,6 +56,12 @@ __global__ void nrrs_ll2_loss(const uint32_t n_elements, const uint32_t stride,
 		values[i + BB_L2_OFFSET]	= 0;
 		gradients[i]				= 0;
 		gradients[i + BB_L2_OFFSET] = 0;
+
+		if (tTrainCost) {
+			values[i + BB_COST_OFFSET]	  = 0;
+			gradients[i + BB_COST_OFFSET] = 0;
+		}
+
 		return;
 	}
 
@@ -148,7 +159,7 @@ __global__ void nrrs_ll2_loss(const uint32_t n_elements, const uint32_t stride,
 		if (isnan(loss_mean) ||
 			(isinf(target_desired) || isnan(target_desired) || isnan(prediction_sq_plus_epsilon)) ||
 			(isinf(diff_x2_2) || isnan(diff_x2_2) || isnan(prediction_x2_sq))) {
-			printf("[%d]: [L] prediction = %g, target = %g, diff = %g, loss_mean = %g"
+			printf("[%d]: [L] prediction = %g, target = %g, diff = %g, loss_mean = %g\n"
 				   "[Var] prediction_x2 = %g, target = %g, diff_x2 = %g\n",
 
 				   i, mean, target, diff, loss_mean, prediction_x2, target_desired, diff_x2);
@@ -173,8 +184,55 @@ __global__ void nrrs_ll2_loss(const uint32_t n_elements, const uint32_t stride,
 		}
 	}
 
+	if (tTrainCost && intra_elem_idx == 0) {
+		// EARS need train mCost
+		const float target_cost		= targets[target_idx + BB_COST_OFFSET];
+		const float prediction_cost = (float) predictions[i + BB_COST_OFFSET];
+
+		const float diff_cost		   = prediction_cost - target_cost;
+		const float diff_cost2		   = diff_cost * diff_cost;
+		const float prediction_cost_sq = prediction_cost * prediction_cost + NRRS_EPSILON;
+		float loss_cost				   = diff_cost2 / prediction_cost_sq / pdf / n_total;
+		float scale_cost			   = 1.0f;
+		if (clampOn) {
+			scale_cost = loss_cost > clampMax ? clampMax / loss_cost : 1.0f;
+		}
+		loss_cost					  = scale_cost * loss_cost;
+		values[i + BB_COST_OFFSET]	  = loss_cost;
+		float grad_cost				  = scale_cost * 2 * diff_cost / prediction_cost_sq;
+		grad_cost					  = grad_cost / pdf / n_total;
+		gradients[i + BB_COST_OFFSET] = (T) (loss_scale * grad_cost);
+
+		// check nan
+		if (isnan(loss_cost) || isinf(loss_cost) || isnan(grad_cost) || isinf(grad_cost)) {
+			printf("[Cost] [%d]: loss_cost = %g, gradient_cost = %g, prediction = %g, cost = %g\n",
+				   i, loss_cost, grad_cost, (float) predictions[i + BB_COST_OFFSET], target_cost);
+		}
+	}
+
+	// gradients[i + BB_L2_OFFSET] = 0;
+	// gradients[i]				= 0;
+
 	// values[i + BB_L2_OFFSET]	= 0;
 	// gradients[i + BB_L2_OFFSET] = 0;
+
+#ifdef BB_TCNN_DEBUG_MODE
+	const bool costThread = tTrainCost && intra_elem_idx == 0;
+	if (showLossIndexEARS == 2) { // L
+		values[i + BB_L2_OFFSET] = 0;
+		if (costThread) {
+			values[i + BB_COST_OFFSET] = 0;
+		}
+	} else if (showLossIndexEARS == 3) { // L^2
+		values[i] = 0;
+		if (costThread) {
+			values[i + BB_COST_OFFSET] = 0;
+		}
+	} else if (showLossIndexEARS == 4) { // cost
+		values[i]				 = 0;
+		values[i + BB_L2_OFFSET] = 0;
+	}
+#endif
 }
 
 template <typename T> class NRRSLL2Loss : public Loss<T> {
@@ -190,12 +248,29 @@ public:
 		CHECK_THROW(gradients.m() == stride);
 		CHECK_THROW(!data_pdf || data_pdf->m() == dims);
 
-		CHECK_THROW(dims == 6);
+		CHECK_THROW(dims == 6 || dims == 7);
 
-		linear_kernel(nrrs_ll2_loss<T>, 0, stream, prediction.n_elements(), stride, loss_scale,
-					  prediction.data(), target.data(), values.data(), gradients.data(),
-					  data_pdf ? data_pdf->data() : nullptr, mClampOn, mClampMax, mTrainSigma,
-					  mOnlyTrainL);
+		if (dims == 6) {
+			linear_kernel(nrrs_ll2_loss<T, false>, 0, stream, prediction.n_elements(), stride, dims,
+						  loss_scale, prediction.data(), target.data(), values.data(),
+						  gradients.data(), data_pdf ? data_pdf->data() : nullptr, mClampOn,
+						  mClampMax, mTrainSigma, mOnlyTrainL
+#ifdef BB_TCNN_DEBUG_MODE
+						  ,
+						  mShowLossIndexEARS
+#endif
+			);
+		} else {
+			linear_kernel(nrrs_ll2_loss<T, true>, 0, stream, prediction.n_elements(), stride, dims,
+						  loss_scale, prediction.data(), target.data(), values.data(),
+						  gradients.data(), data_pdf ? data_pdf->data() : nullptr, mClampOn,
+						  mClampMax, mTrainSigma, mOnlyTrainL
+#ifdef BB_TCNN_DEBUG_MODE
+						  ,
+						  mShowLossIndexEARS
+#endif
+			);
+		}
 	}
 
 	void update_hyperparams(const json &params) override {
@@ -205,6 +280,8 @@ public:
 		mStep		= params.value("step", mStep);
 
 		mOnlyTrainL = mStep == 0;
+
+		mShowLossIndexEARS = params.value("show_loss_index_ears", mShowLossIndexEARS);
 
 		if (!(params.size() == 1 && params.contains("offset"))) {
 			printf("[NRRS_LL2 Loss] update hyperparams: %s,{\"only_train_L\":%d}\n",
@@ -226,6 +303,10 @@ private:
 	float mClampMax{500.0f};
 	bool mOnlyTrainL{false}; // false: train both L and L2; true: only train L, controlled by step
 	bool mTrainSigma{true};	 // train sigma or X2
+
+	int mShowLossIndexEARS{1}; // 0: none; 1: all; 2: L; 3: L^2; 4: cost
+							   // 0 won't come here
 };
 
+#undef BB_COST_OFFSET
 } // namespace tcnn
