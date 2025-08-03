@@ -87,7 +87,7 @@ __global__ void nrrs_ll2_loss(const uint32_t n_elements, const uint32_t stride, 
 	grad_mean		= grad_mean / pdf / n_total;
 	gradients[i]	= (T) (loss_scale * grad_mean);
 
-	if (onlyTrainL && trainSigma) {
+	if (onlyTrainL) {
 		values[i + BB_L2_OFFSET]	= 0;
 		gradients[i + BB_L2_OFFSET] = 0;
 		return;
