@@ -432,6 +432,7 @@ __global__ void nrrs_rrs_loss(
 		gradients[prediction_idx] =
 			(T) (BB_RRS_LOSS_SCALE_STEP2 * scale * loss_scale * gradient / n_total);
 
+#ifdef BB_TCNN_DEBUG_MODE
 		if (isinf(values[prediction_idx]) || isnan(values[prediction_idx]) ||
 			isinf(float(gradients[prediction_idx])) || isnan(float(gradients[prediction_idx])) ||
 			isnan(v) || isinf(v) || isnan(gradient) || isinf(gradient)) {
@@ -440,6 +441,7 @@ __global__ void nrrs_rrs_loss(
 				   thread_idx, v, gradient, rrs_gt, prediction, (float) predictions[prediction_idx],
 				   prediction_ori);
 		}
+#endif
 
 		// if (step == 2) {
 		// 	// d(output)/d(L)

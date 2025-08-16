@@ -177,11 +177,13 @@ __global__ void nrrs_ll2_loss(const uint32_t n_elements, const uint32_t stride, 
 		grad_x2						= grad_x2 / pdf / n_total;
 		gradients[i + BB_L2_OFFSET] = (T) (loss_scale * grad_x2);
 
+#ifdef BB_TCNN_DEBUG_MODE
 		// check nan
 		if (isnan(loss_x2) || isinf(loss_x2) || isnan(grad_x2) || isinf(grad_x2)) {
 			printf("L2 [%d]: loss_x2 = %g, gradient_x2 = %g, prediction = %g, L2 = %g\n", i,
 				   loss_x2, grad_x2, (float) predictions[i + BB_L2_OFFSET], target_desired);
 		}
+#endif
 	}
 
 	if (tTrainCost && intra_elem_idx == 0) {
