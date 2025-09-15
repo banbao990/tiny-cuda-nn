@@ -17,7 +17,7 @@ __global__ void nrrs_ll2_loss(const uint32_t n_elements, const uint32_t stride, 
 							  const float *__restrict__ targets, float *__restrict__ values,
 							  T *__restrict__ gradients, const float *__restrict__ data_pdf,
 							  const bool clampOn, const float clampMax, const bool trainSigma,
-							  const bool onlyTrainL
+							  const bool onlyTrainL, const bool stopTrainCost
 #ifdef BB_TCNN_DEBUG_MODE
 							  ,
 							  const int showLossIndexEARS = 1
@@ -187,28 +187,34 @@ __global__ void nrrs_ll2_loss(const uint32_t n_elements, const uint32_t stride, 
 	}
 
 	if (tTrainCost && intra_elem_idx == 0) {
-		// EARS need train mCost
-		const float target_cost		= targets[target_idx + BB_COST_OFFSET];
-		const float prediction_cost = (float) predictions[i + BB_COST_OFFSET];
+		if (stopTrainCost) {
+			values[i + BB_COST_OFFSET]	  = 0;
+			gradients[i + BB_COST_OFFSET] = 0;
+		} else {
+			// EARS need train mCost
+			const float target_cost		= targets[target_idx + BB_COST_OFFSET];
+			const float prediction_cost = (float) predictions[i + BB_COST_OFFSET];
 
-		const float diff_cost		   = prediction_cost - target_cost;
-		const float diff_cost2		   = diff_cost * diff_cost;
-		const float prediction_cost_sq = prediction_cost * prediction_cost + NRRS_EPSILON;
-		float loss_cost				   = diff_cost2 / prediction_cost_sq / pdf / n_total;
-		float scale_cost			   = 1.0f;
-		if (clampOn) {
-			scale_cost = loss_cost > clampMax ? clampMax / loss_cost : 1.0f;
-		}
-		loss_cost					  = scale_cost * loss_cost;
-		values[i + BB_COST_OFFSET]	  = loss_cost;
-		float grad_cost				  = scale_cost * 2 * diff_cost / prediction_cost_sq;
-		grad_cost					  = grad_cost / pdf / n_total;
-		gradients[i + BB_COST_OFFSET] = (T) (loss_scale * grad_cost);
+			const float diff_cost		   = prediction_cost - target_cost;
+			const float diff_cost2		   = diff_cost * diff_cost;
+			const float prediction_cost_sq = prediction_cost * prediction_cost + NRRS_EPSILON;
+			float loss_cost				   = diff_cost2 / prediction_cost_sq / pdf / n_total;
+			float scale_cost			   = 1.0f;
+			if (clampOn) {
+				scale_cost = loss_cost > clampMax ? clampMax / loss_cost : 1.0f;
+			}
+			loss_cost					  = scale_cost * loss_cost;
+			values[i + BB_COST_OFFSET]	  = loss_cost;
+			float grad_cost				  = scale_cost * 2 * diff_cost / prediction_cost_sq;
+			grad_cost					  = grad_cost / pdf / n_total;
+			gradients[i + BB_COST_OFFSET] = (T) (loss_scale * grad_cost);
 
-		// check nan
-		if (isnan(loss_cost) || isinf(loss_cost) || isnan(grad_cost) || isinf(grad_cost)) {
-			printf("[Cost] [%d]: loss_cost = %g, gradient_cost = %g, prediction = %g, cost = %g\n",
-				   i, loss_cost, grad_cost, (float) predictions[i + BB_COST_OFFSET], target_cost);
+			// check nan
+			if (isnan(loss_cost) || isinf(loss_cost) || isnan(grad_cost) || isinf(grad_cost)) {
+				printf(
+					"[Cost] [%d]: loss_cost = %g, gradient_cost = %g, prediction = %g, cost = %g\n",
+					i, loss_cost, grad_cost, (float) predictions[i + BB_COST_OFFSET], target_cost);
+			}
 		}
 	}
 
@@ -256,7 +262,7 @@ public:
 			linear_kernel(nrrs_ll2_loss<T, false>, 0, stream, prediction.n_elements(), stride, dims,
 						  loss_scale, prediction.data(), target.data(), values.data(),
 						  gradients.data(), data_pdf ? data_pdf->data() : nullptr, mClampOn,
-						  mClampMax, mTrainSigma, mOnlyTrainL
+						  mClampMax, mTrainSigma, mOnlyTrainL, /* no effective */ true
 #ifdef BB_TCNN_DEBUG_MODE
 						  ,
 						  mShowLossIndexEARS
@@ -266,7 +272,7 @@ public:
 			linear_kernel(nrrs_ll2_loss<T, true>, 0, stream, prediction.n_elements(), stride, dims,
 						  loss_scale, prediction.data(), target.data(), values.data(),
 						  gradients.data(), data_pdf ? data_pdf->data() : nullptr, mClampOn,
-						  mClampMax, mTrainSigma, mOnlyTrainL
+						  mClampMax, mTrainSigma, mOnlyTrainL, mStopTrainCost
 #ifdef BB_TCNN_DEBUG_MODE
 						  ,
 						  mShowLossIndexEARS
@@ -280,6 +286,8 @@ public:
 		mClampOn	= params.value("clamp_on", mClampOn);
 		mTrainSigma = params.value("train_sigma", mTrainSigma);
 		mStep		= params.value("step", mStep);
+
+		mStopTrainCost = params.value("stop_train_cost", mStopTrainCost);
 
 		mOnlyTrainL = mStep == 0;
 
@@ -308,6 +316,8 @@ private:
 
 	int mShowLossIndexEARS{1}; // 0: none; 1: all; 2: L; 3: L^2; 4: cost
 							   // 0 won't come here
+
+	bool mStopTrainCost{false}; // only effective when dims == 7 in evaluate()
 };
 
 #undef BB_COST_OFFSET
