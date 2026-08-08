@@ -430,7 +430,7 @@ public:
 
 		// Align memory at least by a cache line (128 bytes).
 		m_alignment = (size_t)128;
-		m_max_size = previous_multiple(cuda_memory_info().total, cuda_memory_granularity());
+		m_max_size = previous_multiple(cuda_memory_info().total/4, cuda_memory_granularity());
 
 		m_free_intervals = {{0, m_max_size}};
 
