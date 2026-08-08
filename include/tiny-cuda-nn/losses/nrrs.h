@@ -10,7 +10,7 @@
 #include <cuda_fp16.h>
 #endif
 
-#define BB_TCNN_DEBUG_MODE
+// #define BB_TCNN_DEBUG_MODE
 
 #define BB_RRS_LOSS_SCALE_STEP2 1e0f
 #define BB_SIGMOID_SCALE 20.0f
